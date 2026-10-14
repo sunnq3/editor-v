@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<!-- The CSP below makes the privacy promise enforceable by the browser: no network connections, no forms, no remote scripts. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' file:; style-src 'self' file: 'unsafe-inline'; img-src 'self' file: blob: data:; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'">
+<title>editor-v</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <h1>editor-v</h1>
+    <span class="tagline">private in-browser image editor</span>
+  </div>
+  <div class="topbar-right">
+    <span class="pill local" title="This page makes no network requests. The image is processed in your browser's memory and is never uploaded or stored.">
+      <span class="dot"></span>100% local — nothing uploaded, nothing stored
+    </span>
+  </div>
+</header>
+
+<div class="layout">
+  <main class="stage">
+    <div class="stage-bar">
+      <button id="btn-open" class="btn primary">Open image…</button>
+      <button id="btn-test" class="btn">Try a test image</button>
+      <span class="sep"></span>
+      <button id="btn-compare" class="btn" title="Hold to see the untouched original (or hold the C key)">Hold: original</button>
+      <div class="segmented" id="zoom-seg">
+        <button data-zoom="fit" class="on">Fit</button>
+        <button data-zoom="1">1:1</button>
+      </div>
+      <label class="inline-select">Preview size
+        <select id="preview-size">
+          <option value="800">800 px</option>
+          <option value="1000" selected>1000 px</option>
+          <option value="1400">1400 px</option>
+          <option value="full">Full (slow)</option>
+        </select>
+      </label>
+      <span class="status" id="status"></span>
+    </div>
+
+    <div class="stage-view" id="view">
+      <div class="canvas-wrap" id="canvas-wrap" hidden>
+        <canvas id="cv"></canvas>
+        <canvas id="ov"></canvas>
+      </div>
+      <div class="empty" id="empty">
+        <div class="empty-card">
+          <div class="empty-icon" aria-hidden="true"></div>
+          <h2>Drop an image here</h2>
+          <p>or click <b>Open image…</b>, or paste one with <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>V</kbd>.</p>
+          <p class="muted">JPEG, PNG, WebP, GIF, BMP, AVIF — whatever your browser can decode. It never leaves this page.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="stage-foot" id="info"></div>
+  </main>
+
+  <aside class="panel" id="panel"></aside>
+</div>
+
+<div class="overlay" id="overlay" hidden>
+  <div class="overlay-card">
+    <div class="spinner"></div>
+    <div id="overlay-text">Working…</div>
+    <div class="muted small">Large images take a few seconds. Everything happens in this tab.</div>
+  </div>
+</div>
+
+<input type="file" id="file-input" accept="image/*" hidden>
+<input type="file" id="settings-input" accept="application/json,.json" hidden>
+
+<script src="pipeline.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
