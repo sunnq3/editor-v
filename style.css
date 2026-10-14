@@ -71,7 +71,8 @@ kbd { font: 12px var(--mono); background: var(--panel-2); border: 1px solid var(
 .panel {
   width: 400px; flex: none; overflow-y: auto; overscroll-behavior: contain;
   border-left: 1px solid var(--line); background: var(--bg-2);
-  padding: 10px 12px 60px;
+  padding-block: 10px 60px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
 }
 @media (max-width: 920px) {
   body { overflow: auto; }
@@ -85,13 +86,13 @@ kbd { font: 12px var(--mono); background: var(--panel-2); border: 1px solid var(
 /* ---------- stage ---------- */
 .stage-bar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 8px 12px; border-bottom: 1px solid var(--line);
+  padding: 8px 16px; border-bottom: 1px solid var(--line);
 }
 .sep { width: 1px; height: 22px; background: var(--line-2); margin: 0 4px; }
 .status { margin-left: auto; color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
 .status.busy { color: var(--accent); }
 .stage-foot {
-  padding: 6px 12px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--text-2);
+  padding: 6px 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--text-2);
   font-family: var(--mono); min-height: 30px; white-space: pre-wrap;
 }
 .stage-view {
@@ -256,3 +257,14 @@ input[type=number] {
 /* ---------- scrollbars ---------- */
 .panel::-webkit-scrollbar, .stage-view::-webkit-scrollbar { width: 10px; height: 10px; }
 .panel::-webkit-scrollbar-thumb, .stage-view::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 999px; border: 2px solid var(--bg-2); }
+
+/* ---------- toast ---------- */
+.toast {
+  position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translate(-50%, 20px);
+  background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text); border-radius: 10px;
+  padding: 10px 16px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 60;
+  max-width: min(90vw, 480px); font-size: 13px;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.warn { border-color: var(--danger); }
+@media (prefers-reduced-motion: reduce) { .toast, .btn, input[type=range]::-webkit-slider-thumb { transition: none; } .spinner { animation-duration: 2s; } }

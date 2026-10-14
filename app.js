@@ -22,6 +22,11 @@
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const raf = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   const fmtBytes = (n) => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(2) + ' MB';
+  let toastTimer = null;
+  function toast(msg, kind) {
+    const t = $('#toast'); t.textContent = msg; t.className = 'toast show' + (kind ? ' ' + kind : '');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = 'toast'; }, 4200);
+  }
 
   /* ------------------------------------------------------------- state */
   const DEF = Pipeline.defaults();
@@ -477,7 +482,7 @@
       schedule('full');
     } catch (e) {
       console.error(e);
-      alert('Could not read that file as an image.');
+      toast('Could not read that file as an image.', 'warn');
     } finally { hideOverlay(); }
   }
   // Downscaled working copies: "full" preview at the chosen size, "quick" at half of it.
@@ -518,7 +523,7 @@
   });
 
   // A synthetic test picture: gradients, fine lines, text-like strokes and colour patches.
-  $('#btn-test').addEventListener('click', async () => {
+  async function loadTestImage() {
     const w = 1600, h = 1100;
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     const ctx = c.getContext('2d');
@@ -539,8 +544,9 @@
     ctx.fillStyle = '#fff'; ctx.fillRect(1230, 110, 240, 240);
     for (let i = 0; i < 12; i++) { ctx.fillStyle = `hsl(${i * 30}, 90%, 55%)`; ctx.fillRect(1230 + i * 20, 110, 20, 60); }
     const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
-    loadBlob(blob, 'test-image');
-  });
+    await loadBlob(blob, 'test-image');
+  }
+  $('#btn-test').addEventListener('click', loadTestImage);
 
   /* --------------------------------------------------------------- info */
   function updateInfo() {
@@ -549,7 +555,8 @@
     const o = Pipeline.outputSize(S.fullW, S.fullH, P);
     const trimmed = o.frame.w !== S.fullW || o.frame.h !== S.fullH;
     info.textContent = `${S.name} · source ${S.fullW}×${S.fullH}${S.note} · output ${o.w}×${o.h}` +
-      (trimmed ? ` · frame trimmed to ${o.frame.w}×${o.frame.h} (${Math.round(o.frame.w * o.frame.h / (S.fullW * S.fullH) * 100)}% of the area)` : '');
+      (trimmed ? ` · frame trimmed to ${o.frame.w}×${o.frame.h} (${Math.round(o.frame.w * o.frame.h / (S.fullW * S.fullH) * 100)}% of the area)` : '') +
+      (S.name === 'test-image' ? '\nThis is the built-in test picture. Open or drop your own image to edit it; it stays in this tab.' : '');
     const fr = $('#frame-readout');
     if (fr) fr.textContent = `Frame: ${o.frame.w} × ${o.frame.h} px` + (trimmed ? ` (from ${S.fullW} × ${S.fullH})` : ' (nothing trimmed)');
   }
@@ -581,25 +588,39 @@
     $('#size-readout').textContent = `≈ ${fmtBytes(blob.size)} at quality ${P.out.quality}`;
     $('#export-readout').textContent = `Output ${img.w} × ${img.h} px`;
   }
+  // Hands a generated file to the person. Inside the claude.ai viewer the page
+  // cannot start downloads itself, so it asks the viewer's download capability;
+  // opened from disk or a plain server, a normal download link does the job.
+  async function deliverFile(blob, filename) {
+    let dl = null;
+    try { if (window.claude && typeof window.claude.use === 'function') dl = await window.claude.use('downloads'); } catch (e) { dl = null; }
+    if (dl) {
+      try { await dl.save({ filename, data: blob }); return 'saved'; }
+      catch (e) {
+        if (e && e.code === 'declined') return 'declined';
+        if (e && (e.code === 'rate_limited')) { toast('A save prompt is already open. Try again in a moment.', 'warn'); return 'failed'; }
+        toast('Saving is not available in this view.', 'warn'); return 'failed';
+      }
+    }
+    const url = URL.createObjectURL(blob);
+    const a = el('a', { href: url, download: filename });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    return 'saved';
+  }
   async function downloadJpeg() {
-    if (!S.full) { alert('Open an image first.'); return; }
+    if (!S.full) { toast('Open an image first.', 'warn'); return; }
     const img = await buildFull();
     const blob = await toJpegBlob(img, P.out.quality);
     $('#size-readout').textContent = `≈ ${fmtBytes(blob.size)} at quality ${P.out.quality}`;
-    $('#export-readout').textContent = `Saved ${img.w} × ${img.h} px`;
-    const url = URL.createObjectURL(blob);
-    const a = el('a', { href: url, download: `${S.name}-edit-q${P.out.quality}.jpg` });
-    document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    const r = await deliverFile(blob, `${S.name}-edit-q${P.out.quality}.jpg`);
+    $('#export-readout').textContent = r === 'saved' ? `Saved ${img.w} × ${img.h} px` : `Output ${img.w} × ${img.h} px (not saved)`;
   }
 
   /* ----------------------------------------------------------- settings */
   function saveSettings() {
     const blob = new Blob([JSON.stringify(P, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = el('a', { href: url, download: 'editor-v-settings.json' });
-    document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    deliverFile(blob, 'editor-v-settings.json');
   }
   function mergeInto(target, src, def) {
     for (const k of Object.keys(def)) {
@@ -623,10 +644,11 @@
       syncAll();
       $('#ov').classList.toggle('active', P.rs.region.on);
       onParamChange('*', 'full');
-    } catch (err) { alert('That file is not a valid settings file.'); }
+    } catch (err) { toast('That file is not a valid settings file.', 'warn'); }
   });
 
   /* --------------------------------------------------------------- init */
   syncAll();
-  setStatus('open an image to begin');
+  setStatus('loading the test picture…');
+  loadTestImage();
 })();
