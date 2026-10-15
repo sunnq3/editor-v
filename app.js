@@ -87,6 +87,18 @@
     }
     return out;
   };
+  const toneControls = () => {
+    const out = [];
+    for (const [c, name, sw, opp] of [['r', 'Red', 'swatch-r', 'cyan'], ['g', 'Green', 'swatch-g', 'magenta'], ['b', 'Blue', 'swatch-b', 'yellow']]) {
+      const n = name.toLowerCase();
+      out.push(group(name + ' channel', sw));
+      out.push(slider(`tone.${c}.shadows`, `${name} — shadows`, -30, 30, 0.5, '', `dark areas lose ${n} (lean ${opp})`, `dark areas gain ${n}`));
+      out.push(slider(`tone.${c}.midtones`, `${name} — midtones`, -50, 50, 1, '', `mid tones lose ${n} (lean ${opp})`, `mid tones gain ${n}`));
+      out.push(slider(`tone.${c}.highlights`, `${name} — highlights`, -50, 50, 1, '', `bright areas lose ${n} (lean ${opp})`, `bright areas gain ${n}`));
+    }
+    return out;
+  };
+  const reseed = () => { P.seed = Math.floor(Math.random() * 1e9); for (const c of controls.values()) if (c.spec.path === 'seed') c.update(); onParamChange('seed', 'full'); };
   const bandControls = (b, title, strengthL, strengthR, noiseWord) => [
     group(title),
     slider(`freq.${b}.gain`, 'Strength', -100, 200, 1, '%', strengthL, strengthR),
@@ -100,6 +112,11 @@
       id: 'ch', title: 'Colour channel shifts', open: true,
       blurb: 'Moves and zooms the red, green and blue layers separately, like the colour fringing of a cheap lens. Any edge that ends up missing a colour is trimmed off the frame automatically, so no smeared borders.',
       controls: [...channelControls(), button('Reset channel shifts', () => resetSection('ch'), { small: true })],
+    },
+    {
+      id: 'tone', title: 'Tone per channel',
+      blurb: 'Brightness curves for red, green and blue separately: shadows, midtones and highlights each get their own control. Small opposite moves on two channels give a faint colour cast that changes every pixel value without looking edited.',
+      controls: [...toneControls(), button('Reset tone', () => resetSection('tone'), { small: true })],
     },
     {
       id: 'freq', title: 'Frequency bands (detail layers)',
@@ -130,9 +147,45 @@
         group('Edge jitter'),
         slider('grad.jitter', 'Amount', 0, 100, 1, '%', 'edges untouched', 'edges randomly sharpened and softened in patches'),
         slider('grad.jitterCell', 'Patch size', 10, 600, 5, 'px', 'tiny patches, almost grainy', 'broad regions'),
-        group('Random pattern'),
-        { type: 'seed' },
-        button('Reset gradient perturbation', () => resetSection('grad'), { small: true }),
+        { type: 'row', controls: [button('New random pattern', reseed, { small: true }), button('Reset gradient perturbation', () => resetSection('grad'), { small: true })] },
+      ],
+    },
+    {
+      id: 'jig', title: 'Invisible jigsaw (block swapping)',
+      blurb: 'Finds flat blocks (sky, walls, skin, bokeh) and swaps each with a similar flat block nearby. By default only the grain moves: every block keeps its own average colour, so the swap is invisible even across gentle gradients, yet the pixel layout is different.',
+      controls: [
+        check('jig.on', 'Swap flat blocks', 'Turns the jigsaw on. Nothing happens to blocks that have visible texture or edges in them.'),
+        slider('jig.block', 'Block size', 4, 64, 1, 'px', 'small tiles, many of them, easier to find matches', 'big tiles, fewer swaps, each moving more pixels'),
+        slider('jig.homog', 'How flat a block must be', 0, 30, 0.5, 'levels', 'only perfectly flat blocks qualify', 'blocks with some grain or soft shading also qualify'),
+        slider('jig.tol', 'How similar two blocks must be', 0, 60, 1, 'levels', 'only near-identical tones are swapped', 'tones may differ more (safe when "keep tone" is on)'),
+        slider('jig.radius', 'Search distance', 1, 20, 1, 'blocks', 'partners come from right next door', 'partners can come from further away'),
+        slider('jig.amount', 'How many to swap', 0, 100, 1, '%', 'swap almost none of the matching blocks', 'swap every matching block'),
+        check('jig.keepTone', 'Keep each block\'s average tone (swap only the grain)', 'On: the moved block is shifted to the average colour of its new spot, so nothing is visible. Off: the raw pixels move; needs a low "similar" setting to stay invisible.'),
+        check('jig.flip', 'Also flip the swapped blocks randomly', 'Mirrors some moved blocks left-right or top-bottom. Harmless on flat areas, visible on anything with structure.'),
+        seg('jig.view', 'Show in the preview', [['normal', 'Result'], ['highlight', 'Outline swapped blocks']], 'Outlines are preview-only; the saved file never has them. The preview is a smaller image, so the exact set of swapped blocks differs at full size.'),
+        readout('jig-readout'),
+        { type: 'row', controls: [button('New random pattern', reseed, { small: true }), button('Reset jigsaw', () => resetSection('jig'), { small: true })] },
+      ],
+    },
+    {
+      id: 'fourier', title: 'Phase shift (Fourier translation)',
+      blurb: 'Moves the whole picture by a fraction of a pixel in the frequency domain: every pixel is rebuilt from a phase-shifted spectrum (sinc interpolation), which is the mathematically exact band-limited shift. Visually identical, but every pixel value changes in a way no ordinary resize produces. The thin edge that would wrap around is trimmed off.',
+      controls: [
+        slider('fourier.x', 'Sideways', -3, 3, 0.01, 'px', 'picture moves left', 'picture moves right', { note: 'Whole numbers move pixels exactly; fractions such as 0.5 are what make this do something.' }),
+        slider('fourier.y', 'Up / down', -3, 3, 0.01, 'px', 'picture moves up', 'picture moves down'),
+        button('Reset phase shift', () => resetSection('fourier'), { small: true }),
+      ],
+    },
+    {
+      id: 'interp', title: 'Interpolation forcing',
+      blurb: 'Re-reads every pixel from a slightly different position: a global fraction-of-a-pixel shift plus a tiny smooth random warp, so each output pixel is a fresh blend of its neighbours at its own phase. Stronger and less regular than a plain resize, with the kernel of your choice.',
+      controls: [
+        slider('interp.x', 'Sideways shift', -1, 1, 0.01, 'px', 'picture moves left', 'picture moves right', { note: '0.5 px forces the strongest blending; 0 or ±1 blends nothing.' }),
+        slider('interp.y', 'Up / down shift', -1, 1, 0.01, 'px', 'picture moves up', 'picture moves down'),
+        slider('interp.warp', 'Random warp', 0, 3, 0.05, 'px', 'no warp, the shift is the same everywhere', 'pixels drift up to this far in slowly varying directions'),
+        slider('interp.warpCell', 'Warp patch size', 10, 600, 5, 'px', 'wobbly, small patches', 'broad, gentle bends'),
+        select('interp.kernel', 'Interpolation method', [['bilinear', 'Bilinear — soft, 4 neighbours'], ['bicubic', 'Bicubic (Catmull-Rom) — sharp, 16 neighbours'], ['lanczos3', 'Lanczos-3 — sharpest, 36 neighbours, slow']], 'Which neighbours each new pixel is blended from.'),
+        { type: 'row', controls: [button('New random pattern', reseed, { small: true }), button('Reset interpolation forcing', () => resetSection('interp'), { small: true })] },
       ],
     },
     {
@@ -168,6 +221,11 @@
         slider('rs.region.h', 'Region — height', 0.02, 1, 0.005, 'frac', 'shorter', 'taller', { pct: true }),
         button('Reset resampling', () => resetSection('rs'), { small: true }),
       ],
+    },
+    {
+      id: 'seed', title: 'Random pattern',
+      blurb: 'All noise, drift, warp and block-swap choices come from this one number. Same number = same result, so your edits are repeatable.',
+      controls: [{ type: 'seed' }],
     },
     {
       id: 'out', title: 'Save', open: true,
@@ -250,10 +308,8 @@
     const update = () => { num.value = P.seed; };
     num.addEventListener('change', () => { P.seed = Math.max(0, Math.floor(+num.value || 0)); update(); onParamChange('seed', 'full'); });
     controls.set('seed', { spec: { path: 'seed' }, input: num, update });
-    const reroll = el('button', { class: 'btn small', type: 'button', text: 'New random pattern', onclick: () => { P.seed = Math.floor(Math.random() * 1e9); update(); onParamChange('seed', 'full'); } });
-    return el('div', {},
-      el('div', { class: 'row' }, el('label', { class: 'lbl', text: 'Pattern number' }), num, reroll),
-      el('div', { class: 'hint single' }, el('span', { class: 'l', text: 'All noise and drift in this tool comes from this number. Same number = same pattern, so results are repeatable. Change it for a different random pattern.' })));
+    const reroll = el('button', { class: 'btn small', type: 'button', text: 'New random pattern', onclick: reseed });
+    return el('div', { class: 'row' }, el('label', { class: 'lbl', text: 'Pattern number' }), num, reroll);
   }
   function buildExport() {
     const dl = el('button', { class: 'btn primary', type: 'button', text: 'Download JPEG', onclick: downloadJpeg });
@@ -275,6 +331,7 @@
       case 'select': return buildSelect(spec);
       case 'seg': return buildSeg(spec);
       case 'button': return el('div', { class: 'row' }, el('button', { class: 'btn' + (spec.small ? ' small ghost' : ''), type: 'button', text: spec.label, onclick: spec.onClick }));
+      case 'row': return el('div', { class: 'row' }, ...spec.controls.map((c) => el('button', { class: 'btn' + (c.small ? ' small ghost' : ''), type: 'button', text: c.label, onclick: c.onClick })));
       case 'note': return el('div', { class: 'note', text: spec.text });
       case 'group': return el('div', { class: 'group' }, el('div', { class: 'group-title' }, spec.swatch ? el('span', { class: 'swatch ' + spec.swatch }) : null, document.createTextNode(spec.title)));
       case 'readout': return el('div', { class: 'readout', id: spec.id });
@@ -295,7 +352,7 @@
   function markTouched() {
     for (const [id, d] of sectionEls) {
       const a = JSON.stringify(P[id]), b = JSON.stringify(DEF[id]);
-      d.classList.toggle('touched', id === 'out' ? false : a !== b);
+      d.classList.toggle('touched', (id === 'out' || id === 'seed') ? false : a !== b);
     }
   }
   function resetSection(id) { P[id] = JSON.parse(JSON.stringify(DEF[id])); syncAll(); onParamChange(id, 'full'); }
@@ -339,6 +396,8 @@
     const img = await Pipeline.run(pv.img, P, pv.k, { status: (s) => setStatus(s, true), tick: raf });
     const dt = performance.now() - t0;
     S.lastResult = img; S.lastK = pv.k;
+    const jr = $('#jig-readout');
+    if (jr) jr.textContent = P.jig.on ? (img.jigStats ? `Preview: ${img.jigStats.swaps} pairs swapped out of ${img.jigStats.eligible} flat blocks (${img.jigStats.blocks} total)` : 'Preview: no matching flat blocks found with these settings') : '';
     S.lastResultRGBA = new ImageData(Pipeline.toRGBA(img), img.w, img.h);
     if (!S.comparing) paintCanvas(S.lastResultRGBA);
     setStatus(`${mode === 'quick' ? 'quick preview' : 'preview'} ${img.w}×${img.h} · ${dt.toFixed(0)} ms`);
@@ -564,7 +623,7 @@
   /* ------------------------------------------------------------- export */
   function showOverlay(t) { $('#overlay-text').textContent = t; $('#overlay').hidden = false; }
   function hideOverlay() { $('#overlay').hidden = true; }
-  function exportKey() { const q = JSON.parse(JSON.stringify(P)); delete q.out; q.freq.view = 'full'; return JSON.stringify(q); }
+  function exportKey() { const q = JSON.parse(JSON.stringify(P)); delete q.out; q.freq.view = 'full'; q.jig.view = 'normal'; return JSON.stringify(q); }
   async function buildFull() {
     const key = exportKey();
     if (S.fullCache && S.fullCache.key === key) return S.fullCache.img;
@@ -641,6 +700,8 @@
       if (!Pipeline.KERNELS[P.rs.kernel] && P.rs.kernel !== 'browser') P.rs.kernel = DEF.rs.kernel;
       if (!Pipeline.KERNELS[P.rs.region.kernel] && P.rs.region.kernel !== 'browser') P.rs.region.kernel = DEF.rs.region.kernel;
       if (!['full', 'low', 'mid', 'high'].includes(P.freq.view)) P.freq.view = 'full';
+      if (!['bilinear', 'bicubic', 'lanczos3'].includes(P.interp.kernel)) P.interp.kernel = DEF.interp.kernel;
+      if (!['normal', 'highlight'].includes(P.jig.view)) P.jig.view = 'normal';
       syncAll();
       $('#ov').classList.toggle('active', P.rs.region.on);
       onParamChange('*', 'full');
