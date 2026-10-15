@@ -1052,17 +1052,60 @@
     }
     return M;
   }
-  function sensorGrid(img, Bp) {
+  /* A soft mask covering roughly `coverage` % of the picture in random patches. */
+  function patchMask(w, h, fullW, fullH, cell, coverage, seed) {
+    if (coverage >= 100) return null;
+    const [nx, ny] = cellsFor(fullW, fullH, Math.max(4, cell));
+    const field = noiseField(w, h, nx, ny, seed);
+    const sample = [];
+    for (let i = 0; i < field.length; i += Math.max(1, Math.floor(field.length / 8192))) sample.push(field[i]);
+    sample.sort((a, b) => a - b);
+    const t = sample[Math.min(sample.length - 1, Math.floor(sample.length * (1 - coverage / 100)))];
+    const mask = new Float32Array(w * h);
+    for (let i = 0; i < mask.length; i++) { let m = (field[i] - t) / 0.2 + 0.5; mask[i] = m < 0 ? 0 : m > 1 ? 1 : m; }
+    return mask;
+  }
+  const PASS_ORDER = ['rggb', 'grbg', 'gbrg', 'bggr'];
+  function sensorGrid(img, Bp, k, seed) {
     if (!Bp) return img;
     const { w, h } = img, N = w * h;
+    k = k || 1;
     let out = img;
     if (Bp.on && Bp.mix > 0 && w >= 4 && h >= 4) {
-      const dem = demosaic(bayerMosaic(img, Bp.pattern), w, h, Bp.pattern, Bp.method);
+      const passes = Math.max(1, Math.min(4, Math.round(Bp.passes || 1)));
+      const noiseAmp = Bp.noise || 0;
+      const mask = noiseAmp > 0 ? patchMask(w, h, w / k, h / k, Bp.noiseCell || 200, Bp.coverage == null ? 100 : Bp.coverage, mixSeed(seed || 0, 61)) : null;
+      const rnd = mulberry32(mixSeed(seed || 0, 62));
+      let cur = img;
+      const start = Math.max(0, PASS_ORDER.indexOf(Bp.pattern));
+      for (let pass = 0; pass < passes; pass++) {
+        const pat = PASS_ORDER[(start + pass) % 4];
+        const m = bayerMosaic(cur, pat);
+        if (noiseAmp > 0) {
+          // raw sensor noise on the single-colour photosites, before the colours are rebuilt
+          for (let i = 0; i < N; i += 2) {
+            // Box-Muller: two Gaussian numbers per iteration
+            const u1 = Math.max(1e-12, rnd()), u2 = rnd(), rad = Math.sqrt(-2 * Math.log(u1));
+            const g1 = rad * Math.cos(2 * Math.PI * u2), g2 = rad * Math.sin(2 * Math.PI * u2);
+            let s1 = noiseAmp, s2 = noiseAmp;
+            if (Bp.noiseShadow) {
+              // like a photo after its tone curve: noise shows most in the shadows
+              const f1 = Math.min(2.5, Math.max(0.4, Math.sqrt(160 / Math.max(8, m[i]))));
+              const f2 = Math.min(2.5, Math.max(0.4, Math.sqrt(160 / Math.max(8, i + 1 < N ? m[i + 1] : 160))));
+              s1 *= f1; s2 *= f2;
+            }
+            if (mask) { s1 *= mask[i]; s2 *= i + 1 < N ? mask[i + 1] : 0; }
+            m[i] += g1 * s1;
+            if (i + 1 < N) m[i + 1] += g2 * s2;
+          }
+        }
+        cur = demosaic(m, w, h, pat, Bp.method);
+      }
       const t = Math.min(1, Bp.mix / 100);
-      if (t >= 1) out = dem;
+      if (t >= 1) out = cur;
       else {
         out = cloneImage(img);
-        for (const name of CH) { const a = out[name], d = dem[name]; for (let i = 0; i < N; i++) a[i] += (d[i] - a[i]) * t; }
+        for (const name of CH) { const a = out[name], d = cur[name]; for (let i = 0; i < N; i++) a[i] += (d[i] - a[i]) * t; }
       }
     }
     if (Bp.dither > 0) {
@@ -1102,7 +1145,7 @@
       interp: { x: 0, y: 0, warp: 0, warpCell: 90, jitter: 0, kernel: 'bicubic' },
       geo: { rotate: 0, tiltX: 0, tiltY: 0, crop: 0, posX: 0, posY: 0, restoreSize: false },
       rs: { kernel: 'lanczos3', roundTrip: 100, outScale: 100 },
-      bayer: { on: false, pattern: 'rggb', method: 'mhc', mix: 100, dither: 0, ditherSize: 4, ditherColor: false },
+      bayer: { on: false, pattern: 'rggb', method: 'mhc', mix: 100, passes: 1, noise: 0, noiseShadow: true, coverage: 100, noiseCell: 200, dither: 0, ditherSize: 4, ditherColor: false },
       out: { quality: 92 },
     };
   };
@@ -1160,7 +1203,7 @@
         return out;
       },
     },
-    bayer: { label: 'Sensor grid…', run: (img, P) => sensorGrid(img, P.bayer) },
+    bayer: { label: 'Bayer sensor grid…', run: (img, P, k) => sensorGrid(img, P.bayer, k, P.seed) },
   };
   Pipeline.STAGE_ORDER = ['ch', 'tone', 'freq', 'grad', 'jig', 'fourier', 'interp', 'geo', 'rs', 'bayer'];
 
