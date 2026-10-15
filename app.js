@@ -372,6 +372,7 @@
 
   // apply bar
   const applyBtn = el('button', { class: 'btn primary', type: 'button', id: 'btn-apply', text: 'Apply step', onclick: applyStep });
+  const dlStepBtn = el('button', { class: 'btn', type: 'button', id: 'btn-download-step', text: 'Download JPEG', title: 'Save what the preview shows, right now, without applying. You can stop at any step.', onclick: downloadJpeg });
   const resetBtn = el('button', { class: 'btn small ghost', type: 'button', text: 'Reset tab', onclick: () => resetSection(S.tab) });
   const wfCheck = el('input', { type: 'checkbox', id: 'wf-resample' }); wfCheck.checked = S.wf.resample;
   const wfPct = el('input', { type: 'number', id: 'wf-pct', min: 25, max: 200, step: 1, value: S.wf.pct, class: 'narrow' });
@@ -383,9 +384,9 @@
   const undoBtn = el('button', { class: 'btn small ghost', type: 'button', id: 'btn-undo', text: 'Undo last step', onclick: undoStep });
   const revertBtn = el('button', { class: 'btn small ghost', type: 'button', id: 'btn-revert', text: 'Revert to original', onclick: revertAll });
   const applyRows = el('div', { id: 'apply-rows' },
-    el('div', { class: 'row' }, applyBtn, resetBtn,
-      el('label', { class: 'wf' }, wfCheck, document.createTextNode(' then resample via '), wfPct, document.createTextNode(' % '), wfKernel)),
-    el('div', { class: 'hint single' }, el('span', { class: 'l', text: 'Apply bakes this tab into the pixels at full size and clears its sliders; "then resample" re-interpolates every pixel afterwards.' })));
+    el('div', { class: 'row' }, applyBtn, dlStepBtn, resetBtn),
+    el('div', { class: 'row' }, el('label', { class: 'wf' }, wfCheck, document.createTextNode(' then resample via '), wfPct, document.createTextNode(' % '), wfKernel)),
+    el('div', { class: 'hint single' }, el('span', { class: 'l', text: 'Download saves what you see at full size — no need to apply or go further. Apply bakes this tab into the pixels and clears its sliders; "then resample" re-interpolates every pixel afterwards.' })));
   const applyBar = el('div', { class: 'apply-bar', id: 'apply-bar' },
     applyRows,
     el('div', { class: 'row work-row' }, el('span', { class: 'readout', id: 'work-readout' }), undoBtn, revertBtn));
@@ -716,8 +717,9 @@
     $('#export-readout').textContent = `Output ${img.w} × ${img.h} px`;
   }
   async function deliverFile(blob, filename) {
-    let dl = null;
-    try { if (window.claude && typeof window.claude.use === 'function') dl = await window.claude.use('downloads'); } catch (e) { dl = null; }
+    let dl = null, embedded = false;
+    try { if (window.claude && typeof window.claude.use === 'function') { embedded = true; dl = await window.claude.use('downloads'); } } catch (e) { dl = null; }
+    if (embedded && !dl) { toast('This embedded view is not allowing saves. Open the tool at sunnq3.github.io/editor-v or from the repo file instead.', 'warn'); return 'failed'; }
     if (dl) {
       try { await dl.save({ filename, data: blob }); return 'saved'; }
       catch (e) {
