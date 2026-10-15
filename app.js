@@ -49,7 +49,7 @@
     tab: 'ch',
     previewFull: null, previewQuick: null, srcPreviewRGBA: null,
     lastResult: null, lastResultRGBA: null, lastK: 1,
-    zoom: 'fit', previewMax: 1000, comparing: false,
+    zoom: 'fit', previewMax: 1000, comparing: false, view: 'result',
     fullCache: null,
     rendering: false, pending: null, timer: null, fullTimer: null,
     wf: { resample: true, pct: 97, kernel: 'lanczos3' },   // "then resample" after each applied step
@@ -458,9 +458,31 @@
     S.lastResult = img; S.lastK = pv.k;
     const jr = $('#jig-readout');
     if (jr) jr.textContent = P.jig.on ? (img.jigStats ? `Preview: ${img.jigStats.swaps} pairs swapped out of ${img.jigStats.eligible} flat blocks (${img.jigStats.blocks} total)` : 'Preview: no matching flat blocks found with these settings') : '';
-    S.lastResultRGBA = new ImageData(Pipeline.toRGBA(img), img.w, img.h);
+    let shown = img, extra = '';
+    if (S.view !== 'result') {
+      const d = diffImage(pv.img, img, S.view === 'diff32' ? 32 : 8);
+      if (d) { shown = d.img; extra = ` · changed ${d.changed}% of pixel values · mean ${d.mean} · max ${d.max} levels`; }
+      else extra = ' · sizes differ, difference view not possible for this step';
+    }
+    S.lastResultRGBA = new ImageData(Pipeline.toRGBA(shown), shown.w, shown.h);
     if (!S.comparing) paintCanvas(S.lastResultRGBA);
-    setStatus(`${mode === 'quick' ? 'quick preview' : 'preview'} ${img.w}×${img.h} · ${dt.toFixed(0)} ms`);
+    setStatus(`${mode === 'quick' ? 'quick preview' : 'preview'} ${img.w}×${img.h} · ${dt.toFixed(0)} ms${extra}`);
+  }
+  // |after − before| per channel, amplified; plus how many 8-bit values moved
+  function diffImage(before, after, gain) {
+    if (before.w !== after.w || before.h !== after.h) return null;
+    const n = before.w * before.h, out = Pipeline.makeImage(before.w, before.h);
+    let sum = 0, changed = 0, max = 0;
+    for (const c of ['r', 'g', 'b']) {
+      const a = before[c], b = after[c], o = out[c];
+      for (let i = 0; i < n; i++) {
+        const qa = Math.round(Math.max(0, Math.min(255, a[i]))), qb = Math.round(Math.max(0, Math.min(255, b[i])));
+        const d = Math.abs(qa - qb);
+        sum += d; if (d >= 1) changed++; if (d > max) max = d;
+        o[i] = Math.min(255, Math.abs(b[i] - a[i]) * gain);
+      }
+    }
+    return { img: out, changed: (100 * changed / (3 * n)).toFixed(1), mean: (sum / (3 * n)).toFixed(2), max };
   }
   function paintCanvas(imageData) {
     const cv = $('#cv');
@@ -485,6 +507,12 @@
     }
   }
   new ResizeObserver(() => layoutCanvas()).observe($('#view'));
+  $('#view-seg').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    S.view = b.dataset.view;
+    [...$('#view-seg').children].forEach((x) => x.classList.toggle('on', x === b));
+    schedule('full');
+  });
   $('#zoom-seg').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     S.zoom = b.dataset.zoom;

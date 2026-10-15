@@ -37,7 +37,7 @@ The tool is step-by-step. Each tab is one stage; its preview shows the **working
 
 **Sensor grid (Bayer)** — the final image is re-sampled through a 2×2 colour-filter mosaic (RGGB / BGGR / GRBG / GBRG) and demosaiced back with Malvar-He-Cutler gradient-corrected interpolation (or bilinear), stamping a sensor-like grid structure into the pixel statistics; mix amount. Also an ordered (Bayer-matrix) dither, 2×2 / 4×4 / 8×8, optionally with a different phase per colour channel.
 
-**Live preview** — a reduced-size preview re-renders as you drag (half-size while moving, full preview on release). "Hold: before step" (or hold `C`) shows the working image as it was before the current tab.
+**Live preview** — a reduced-size preview re-renders as you drag (half-size while moving, full preview on release). "Hold: before step" (or hold `C`) shows the working image as it was before the current tab. The **Changes ×8 / ×32** view shows the difference between the result and the working image, amplified (black = unchanged), with the share of pixel values that moved, the mean and the maximum change in the status line — the way to see that a subtle step such as a 97 % resample really touched the pixels.
 
 **Save** — JPEG at a chosen quality, rendered at full resolution with the same pipeline. Going through the browser's encoder also drops EXIF/GPS metadata. Every export gets a random four-digit name (`4831.jpg`), never repeated in a session, so versions don't get mixed up. Settings can be saved to and loaded from a small `.json` file.
 
