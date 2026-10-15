@@ -378,7 +378,7 @@
   const bodyWrap = el('div', { class: 'tab-bodies' }, ...tabBodies.values());
 
   // apply bar
-  const applyBtn = el('button', { class: 'btn primary', type: 'button', id: 'btn-apply', text: 'Apply step', onclick: applyStep });
+  const applyBtn = el('button', { class: 'btn primary', type: 'button', id: 'btn-apply', text: 'Apply step', title: 'Bake this tab into the working image at full size and clear its sliders; the next tab starts from those pixels', onclick: applyStep });
   const dlStepBtn = el('button', { class: 'btn', type: 'button', id: 'btn-download-step', text: 'Download JPEG', title: 'Save what the preview shows, right now, without applying. You can stop at any step.', onclick: downloadJpeg });
   const resetBtn = el('button', { class: 'btn small ghost', type: 'button', text: 'Reset tab', onclick: () => resetSection(S.tab) });
   const wfCheck = el('input', { type: 'checkbox', id: 'wf-resample' }); wfCheck.checked = S.wf.resample;
@@ -391,9 +391,8 @@
   const undoBtn = el('button', { class: 'btn small ghost', type: 'button', id: 'btn-undo', text: 'Undo last step', onclick: undoStep });
   const revertBtn = el('button', { class: 'btn small ghost', type: 'button', id: 'btn-revert', text: 'Revert to original', onclick: revertAll });
   const applyRows = el('div', { id: 'apply-rows' },
-    el('div', { class: 'row' }, applyBtn, dlStepBtn, resetBtn),
-    el('div', { class: 'row' }, el('label', { class: 'wf' }, wfCheck, document.createTextNode(' then resample via '), wfPct, document.createTextNode(' % '), wfKernel)),
-    el('div', { class: 'hint single' }, el('span', { class: 'l', text: 'Download saves what you see at full size — no need to apply or go further. Apply bakes this tab into the pixels and clears its sliders; "then resample" re-interpolates every pixel afterwards.' })));
+    el('div', { class: 'row' }, applyBtn, dlStepBtn, resetBtn,
+      el('label', { class: 'wf', title: 'After applying, re-interpolate every pixel by scaling to this temporary size and back with this method' }, wfCheck, document.createTextNode(' then resample via '), wfPct, document.createTextNode(' % '), wfKernel)));
   const applyBar = el('div', { class: 'apply-bar', id: 'apply-bar' },
     applyRows,
     el('div', { class: 'row work-row' }, el('span', { class: 'readout', id: 'work-readout' }), undoBtn, revertBtn));
@@ -588,7 +587,7 @@
       S.lastSaved = '';
       setWork(img, true);
       $('#empty').hidden = true; $('#canvas-wrap').hidden = false;
-      toast(`Loaded ${S.name} · ${img.w}×${img.h}`);
+      toast(S.name === 'test-image' ? 'Built-in test picture loaded. Open or drop your own image; it never leaves this tab.' : `Loaded ${S.fileName} · ${img.w}×${img.h}`);
     } catch (e) {
       console.error(e);
       toast('Could not read that file as an image.', 'warn');
@@ -671,7 +670,6 @@
     if (S.lastSaved) line += ` · last saved as ${S.lastSaved}`;
     line += `\nworking image ${S.work.w}×${S.work.h} · ${S.steps.length} step${S.steps.length === 1 ? '' : 's'} applied`;
     if (S.tab !== 'out') line += ` · ${sec.tab} tab: ${pend ? `pending → ${o.w}×${o.h}` : 'nothing set yet'}`;
-    if (S.name === 'test-image') line += '\nThis is the built-in test picture. Open or drop your own image to edit it; it stays in this tab.';
     info.replaceChildren(el('span', { class: 'file-name', text: S.fileName }), document.createTextNode(line.slice(S.fileName.length)));
     const fr = $('#frame-readout');
     if (fr) { const f = Pipeline.stageOutputSize(S.work.w, S.work.h, 'geo', P); fr.textContent = `Frame: ${f.w} × ${f.h} px` + (f.w !== S.work.w || f.h !== S.work.h ? ` (from ${S.work.w} × ${S.work.h})` : ' (nothing trimmed)'); }
@@ -839,6 +837,26 @@
       toast('Settings loaded; each tab shows its pending values.');
     } catch (err) { toast('That file is not a valid settings file.', 'warn'); }
   });
+
+  /* --------------------------------------------------------- divider */
+  (function () {
+    const div = $('#divider'), root = document.documentElement;
+    let saved = null;
+    try { saved = +localStorage.getItem('editor-v.panelWidth') || null; } catch (e) { saved = null; }
+    const apply = (w) => { root.style.setProperty('--panel-w', Math.round(w) + 'px'); };
+    if (saved) apply(saved);
+    let dragging = false;
+    div.addEventListener('pointerdown', (e) => { dragging = true; div.setPointerCapture(e.pointerId); div.classList.add('dragging'); document.body.classList.add('resizing'); e.preventDefault(); });
+    div.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const w = clamp(window.innerWidth - e.clientX - 3, 340, Math.max(340, window.innerWidth * 0.7));
+      apply(w); layoutCanvas();
+    });
+    const end = () => { if (!dragging) return; dragging = false; div.classList.remove('dragging'); document.body.classList.remove('resizing');
+      try { localStorage.setItem('editor-v.panelWidth', String(parseInt(root.style.getPropertyValue('--panel-w')) || '')); } catch (e) {} };
+    div.addEventListener('pointerup', end); div.addEventListener('pointercancel', end);
+    div.addEventListener('dblclick', () => { root.style.removeProperty('--panel-w'); try { localStorage.removeItem('editor-v.panelWidth'); } catch (e) {} layoutCanvas(); });
+  })();
 
   /* --------------------------------------------------------------- init */
   syncAll();

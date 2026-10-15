@@ -69,18 +69,23 @@ kbd { font: 12px var(--mono); background: var(--panel-2); border: 1px solid var(
 .layout { flex: 1; display: flex; min-height: 0; }
 .stage { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .panel {
-  width: 400px; flex: none; overflow-y: auto; overscroll-behavior: contain;
+  width: var(--panel-w, clamp(400px, 34vw, 900px)); flex: none; overflow-y: auto; overscroll-behavior: contain;
   border-left: 1px solid var(--line); background: var(--bg-2);
   padding-block: 10px 60px;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
 }
+.divider { flex: none; width: 7px; cursor: col-resize; background: transparent; position: relative; }
+.divider::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: var(--line-2); transition: background .15s, width .15s, left .15s; }
+.divider:hover::after, .divider.dragging::after { background: var(--accent); width: 3px; left: 2px; }
+body.resizing { cursor: col-resize; user-select: none; }
 @media (max-width: 920px) {
   body { overflow: auto; }
   .tagline { display: none; }
   .pill { font-size: 11.5px; padding: 4px 10px; }
   .layout { flex-direction: column; }
   .stage { min-height: 70vh; }
-  .panel { width: auto; border-left: 0; border-top: 1px solid var(--line); }
+  .panel { width: auto !important; border-left: 0; border-top: 1px solid var(--line); }
+  .divider { display: none; }
 }
 
 /* ---------- stage ---------- */
@@ -92,8 +97,8 @@ kbd { font: 12px var(--mono); background: var(--panel-2); border: 1px solid var(
 .status { margin-left: auto; color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
 .status.busy { color: var(--accent); }
 .stage-foot {
-  padding: 6px 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--text-2);
-  font-family: var(--mono); min-height: 30px; white-space: pre-wrap;
+  flex: none; padding: 5px 16px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--text-2);
+  font-family: var(--mono); min-height: 30px; max-height: 3.3em; overflow: hidden; white-space: pre-wrap; line-height: 1.4;
 }
 .stage-view {
   flex: 1; min-height: 0; position: relative; overflow: auto;
@@ -150,11 +155,10 @@ select {
 
 /* ---------- tabs ---------- */
 .tabs {
-  position: sticky; top: 0; z-index: 5; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
+  position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 4px;
   margin: 0 calc(-1 * max(16px, env(safe-area-inset-left, 0px))) 10px; padding: 10px max(16px, env(safe-area-inset-left, 0px)) 8px;
   background: rgba(15, 18, 34, 0.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
 }
-.tabs::-webkit-scrollbar { display: none; }
 .tab {
   flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 999px;
   border: 1px solid var(--line-2); background: var(--panel); color: var(--text-2); cursor: pointer; font-size: 12.5px; white-space: nowrap;
@@ -163,8 +167,11 @@ select {
 .tab.on { background: var(--accent-soft); border-color: var(--accent); color: #fff; }
 .tab .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 8px var(--accent-2); display: none; }
 .tab.pending .tab-dot { display: inline-block; }
-.tab-body { padding: 0 2px 16px; }
+.tab-body { padding: 0 2px 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); column-gap: 28px; align-items: start; }
 .tab-body > h2 { font-size: 15.5px; margin: 4px 0 6px; }
+.tab-body > h2, .tab-body > .blurb, .tab-body > .group, .tab-body > .note, .tab-body > .row, .tab-body > .readout, .tab-body > .seg-ctl, .tab-body > .sel { grid-column: 1 / -1; }
+.tab-body > .ctl, .tab-body > .check { min-width: 0; }
+.tab-body > .blurb { max-width: 72ch; }
 .tab-bodies { min-height: 200px; }
 
 /* ---------- apply bar ---------- */
@@ -175,8 +182,8 @@ select {
   box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.35);
 }
 .apply-bar .row { margin: 3px 0; gap: 6px; }
-.apply-bar .hint { margin: 2px 0 4px; font-size: 11px; }
 .apply-bar .readout { margin: 0; }
+.apply-bar .wf { margin-left: 4px; }
 .apply-bar .work-row { justify-content: space-between; }
 .wf { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); cursor: pointer; flex-wrap: wrap; }
 .wf input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
