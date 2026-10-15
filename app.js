@@ -100,25 +100,7 @@
     }
     return out;
   };
-  const toneControls = () => {
-    const out = [];
-    for (const [c, name, sw, opp] of [['r', 'Red', 'swatch-r', 'cyan'], ['g', 'Green', 'swatch-g', 'magenta'], ['b', 'Blue', 'swatch-b', 'yellow']]) {
-      const n = name.toLowerCase();
-      out.push(group(name + ' channel', sw));
-      out.push(slider(`tone.${c}.shadows`, `${name} — shadows`, -30, 30, 0.5, '', `dark areas lose ${n} (lean ${opp})`, `dark areas gain ${n}`));
-      out.push(slider(`tone.${c}.midtones`, `${name} — midtones`, -50, 50, 1, '', `mid tones lose ${n} (lean ${opp})`, `mid tones gain ${n}`));
-      out.push(slider(`tone.${c}.highlights`, `${name} — highlights`, -50, 50, 1, '', `bright areas lose ${n} (lean ${opp})`, `bright areas gain ${n}`));
-    }
-    return out;
-  };
   const reseed = () => { P.seed = Math.floor(Math.random() * 1e9); for (const c of controls.values()) if (c.spec.path === 'seed') c.update(); onParamChange('seed', 'full'); };
-  const bandControls = (b, title, strengthL, strengthR, noiseWord) => [
-    group(title),
-    slider(`freq.${b}.gain`, 'Strength', -100, 200, 1, '%', strengthL, strengthR),
-    slider(`freq.${b}.noise`, 'Add noise', 0, 40, 0.5, 'levels', 'no noise added', `more random ${noiseWord} in this layer`),
-    slider(`freq.${b}.blur`, 'Blur this layer', 0, 12, 0.1, 'px', 'layer stays as it is', 'layer smears more'),
-    slider(`freq.${b}.smooth`, 'Smooth this layer', 0, 100, 1, '', 'untouched', 'evens out small bumps but keeps this layer\'s strong edges'),
-  ];
 
   const SECTIONS = [
     {
@@ -148,43 +130,6 @@
       controls: [...channelControls()],
     },
     {
-      id: 'tone', tab: 'Tone', title: 'Tone per channel',
-      blurb: 'Brightness curves for red, green and blue separately: shadows, midtones and highlights each get their own control. Small opposite moves on two channels give a faint colour cast that changes every pixel value without looking edited.',
-      controls: [...toneControls()],
-    },
-    {
-      id: 'freq', tab: 'Bands', title: 'Frequency bands (detail layers)',
-      blurb: 'Splits the picture into three layers by the size of detail: Fine (grain, hair, edges), Medium (textures, small shapes) and Coarse (big shapes, lighting). Each layer can be boosted or cut, blurred, smoothed, or given its own noise.',
-      controls: [
-        slider('freq.fine', 'Fine ↔ medium boundary', 0.5, 8, 0.1, 'px', 'fine layer keeps only the tiniest detail', 'fine layer takes in bigger detail too'),
-        slider('freq.coarse', 'Medium ↔ coarse boundary', 4, 80, 0.5, 'px', 'coarse layer holds only the very largest shapes', 'coarse layer swallows more mid-size shapes'),
-        seg('freq.view', 'Show in the preview', [['full', 'Everything'], ['low', 'Coarse'], ['mid', 'Medium'], ['high', 'Fine']],
-          'Look at one layer on its own to understand what you are editing. Applying and saving always use everything.'),
-        check('freq.colorNoise', 'Colour noise', 'On: each colour channel gets its own noise pattern (coloured speckle). Off: the same pattern on all three (neutral grain).'),
-        ...bandControls('low', 'Coarse layer — big shapes & lighting', 'big shapes flatten toward an even tone', 'big shapes get more contrast', 'soft blotches'),
-        ...bandControls('mid', 'Medium layer — textures & small shapes', 'textures fade away', 'textures stand out harder', 'speckle'),
-        ...bandControls('high', 'Fine layer — grain, hair & edges', 'fine detail softens away', 'fine detail sharpens, grain shows', 'fine grain'),
-        button('New random pattern', reseed, { small: true }),
-      ],
-    },
-    {
-      id: 'grad', tab: 'Gradient', title: 'Gradient perturbation',
-      blurb: 'Adds slow, smooth changes of brightness and colour across the picture — like faint uneven lighting — plus a random variation in how strong edges are. Subtle amounts are invisible to the eye but change every pixel.',
-      controls: [
-        group('Random drift'),
-        slider('grad.drift', 'Amount', 0, 40, 0.5, 'levels', 'none', 'stronger patches of light, dark and colour drift'),
-        slider('grad.driftCell', 'Patch size', 20, 1500, 10, 'px', 'small, busy patches', 'huge, gentle sweeps'),
-        check('grad.driftColor', 'Drift colour, not just brightness', 'On: each colour channel drifts its own way, giving faint colour casts. Off: brightness only.'),
-        group('Lighting tilt'),
-        slider('grad.tilt', 'Strength', -40, 40, 0.5, 'levels', 'light fades toward the angle (that side darker)', 'light grows toward the angle (that side brighter)'),
-        slider('grad.tiltAngle', 'Angle', 0, 360, 1, '°', 'turns the tilt direction anticlockwise', 'turns the tilt direction clockwise', { note: '0° = across (right side changes), 90° = down (bottom changes).' }),
-        group('Edge jitter'),
-        slider('grad.jitter', 'Amount', 0, 100, 1, '%', 'edges untouched', 'edges randomly sharpened and softened in patches'),
-        slider('grad.jitterCell', 'Patch size', 10, 600, 5, 'px', 'tiny patches, almost grainy', 'broad regions'),
-        button('New random pattern', reseed, { small: true }),
-      ],
-    },
-    {
       id: 'jig', tab: 'Jigsaw', title: 'Invisible jigsaw (block swapping)',
       blurb: 'Finds flat blocks (sky, walls, skin, bokeh) and swaps each with a similar flat block nearby. By default only the grain moves: every block keeps its own average colour, so the swap is invisible even across gentle gradients, yet the pixel layout is different.',
       controls: [
@@ -199,14 +144,6 @@
         seg('jig.view', 'Show in the preview', [['normal', 'Result'], ['highlight', 'Outline swapped blocks']], 'Outlines are preview-only; applying and saving never include them. The preview is a smaller image, so the exact set of swapped blocks differs at full size.'),
         readout('jig-readout'),
         button('New random pattern', reseed, { small: true }),
-      ],
-    },
-    {
-      id: 'fourier', tab: 'Phase', title: 'Phase shift (Fourier translation)',
-      blurb: 'Moves the whole picture by a fraction of a pixel in the frequency domain: every pixel is rebuilt from a phase-shifted spectrum (sinc interpolation), which is the mathematically exact band-limited shift. Visually identical, but every pixel value changes in a way no ordinary resize produces. The thin edge that would wrap around is trimmed off.',
-      controls: [
-        slider('fourier.x', 'Sideways', -3, 3, 0.01, 'px', 'picture moves left', 'picture moves right', { note: 'Whole numbers move pixels exactly; fractions such as 0.5 are what make this do something.' }),
-        slider('fourier.y', 'Up / down', -3, 3, 0.01, 'px', 'picture moves up', 'picture moves down'),
       ],
     },
     {
@@ -771,7 +708,7 @@
   /* ------------------------------------------------------------- export */
   function showOverlay(t) { $('#overlay-text').textContent = t; $('#overlay').hidden = false; }
   function hideOverlay() { $('#overlay').hidden = true; }
-  function exportKey() { const q = deep(P[S.tab] || {}); if (q.view) q.view = S.tab === 'freq' ? 'full' : 'normal'; return S.tab + ':' + S.workVersion + ':' + JSON.stringify(q) + ':' + P.seed; }
+  function exportKey() { const q = deep(P[S.tab] || {}); if (q.view) q.view = 'normal'; return S.tab + ':' + S.workVersion + ':' + JSON.stringify(q) + ':' + P.seed; }
   // full-resolution version of what the preview shows: the working image plus this tab's pending settings
   async function buildFull() {
     const key = exportKey();
@@ -869,7 +806,6 @@
       if (j.workflow) { mergeInto(S.wf, j.workflow, { resample: true, pct: 97, kernel: 'lanczos3' }); wfCheck.checked = S.wf.resample; wfPct.value = S.wf.pct; wfKernel.value = S.wf.kernel; }
       for (const c of controls.values()) if (c.spec.type === 'slider') setPath(P, c.spec.path, clamp(getPath(P, c.spec.path), c.spec.min, c.spec.max));
       if (!Pipeline.KERNELS[P.rs.kernel] && P.rs.kernel !== 'browser') P.rs.kernel = DEF.rs.kernel;
-      if (!['full', 'low', 'mid', 'high'].includes(P.freq.view)) P.freq.view = 'full';
       if (!['bilinear', 'bicubic', 'lanczos3'].includes(P.interp.kernel)) P.interp.kernel = DEF.interp.kernel;
       if (!['normal', 'highlight'].includes(P.jig.view)) P.jig.view = 'normal';
       if (!['rggb', 'bggr', 'grbg', 'gbrg'].includes(P.bayer.pattern)) P.bayer.pattern = 'rggb';

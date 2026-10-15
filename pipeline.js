@@ -1134,16 +1134,7 @@
       photo: { sharpen: 0, radius: 1, masking: 0, nrLuma: 0, nrColor: 0, texture: 0, grain: 0, grainSize: 1, grainRough: 0, grainColor: false },
       cleanup: { dering: 0, deblock: 0, blockSize: 8, deband: 0, chroma: 0, chromaEdge: true, gamut: 0 },
       ch: { r: { x: 0, y: 0, z: 0 }, g: { x: 0, y: 0, z: 0 }, b: { x: 0, y: 0, z: 0 } },
-      tone: { r: { shadows: 0, midtones: 0, highlights: 0 }, g: { shadows: 0, midtones: 0, highlights: 0 }, b: { shadows: 0, midtones: 0, highlights: 0 } },
-      freq: {
-        fine: 2, coarse: 16, view: 'full', colorNoise: false,
-        low: { gain: 0, noise: 0, blur: 0, smooth: 0 },
-        mid: { gain: 0, noise: 0, blur: 0, smooth: 0 },
-        high: { gain: 0, noise: 0, blur: 0, smooth: 0 },
-      },
-      grad: { drift: 0, driftCell: 300, driftColor: true, tilt: 0, tiltAngle: 0, jitter: 0, jitterCell: 120 },
       jig: { on: false, block: 16, homog: 6, tol: 12, radius: 6, amount: 100, keepTone: true, flip: false, view: 'normal' },
-      fourier: { x: 0, y: 0 },
       interp: { x: 0, y: 0, warp: 0, warpCell: 90, jitter: 0, kernel: 'bicubic' },
       geo: { rotate: 0, tiltX: 0, tiltY: 0, crop: 0, posX: 0, posY: 0, restoreSize: false },
       rs: { kernel: 'lanczos3', roundTrip: 100, outScale: 100 },
@@ -1395,24 +1386,13 @@
   Pipeline.cropImage = cropImage;
 
   /* Each stage, runnable on its own. `id` names the parameter section. The
-     stages that smear edges (channel shift, phase shift, interpolation
-     forcing) trim themselves, so the result never carries a bad border. */
+     stages that smear edges (channel shift, interpolation forcing) trim
+     themselves, so the result never carries a bad border. */
   const STAGES = {
     cleanup: { label: 'Cleaning up…', run: (img, P, k) => cleanup(img, P.cleanup || {}, k, P.seed) },
     photo: { label: 'Developing (edit photo)…', run: (img, P, k) => photoEdit(img, P.photo || {}, k, P.seed) },
     ch: { label: 'Shifting colour channels…', run: (img, P, k) => cropImage(channelShift(img, P.ch, k).img, validRect(img.w, img.h, P.ch, k)) },
-    tone: { label: 'Adjusting tone per channel…', run: (img, P) => toneAdjust(img, P.tone || {}) },
-    freq: { label: 'Editing frequency bands…', run: (img, P, k, o) => frequencyEdit(img, P.freq, k, P.seed, o.forExport ? 'full' : P.freq.view) },
-    grad: { label: 'Perturbing gradients…', run: (img, P, k) => gradientPerturb(img, P.grad, k, P.seed) },
     jig: { label: 'Swapping flat blocks…', run: (img, P, k, o) => blockSwap(img, P.jig, k, P.seed, !o.forExport && P.jig && P.jig.view === 'highlight') },
-    fourier: {
-      label: 'Phase-shifting (Fourier)…',
-      run: (img, P, k) => {
-        const F = P.fourier || {}, out = fourierShift(img, F, k);
-        const fd = Math.max(Math.abs(F.x || 0), Math.abs(F.y || 0));
-        return fd ? cropImage(out, insetRect({ x0: 0, y0: 0, x1: img.w, y1: img.h }, fd * k + 2, img.w, img.h)) : out;
-      },
-    },
     interp: {
       label: 'Forcing interpolation…',
       run: (img, P, k) => {
@@ -1440,7 +1420,7 @@
     },
     bayer: { label: 'Bayer sensor grid…', run: (img, P, k) => sensorGrid(img, P.bayer, k, P.seed) },
   };
-  Pipeline.STAGE_ORDER = ['photo', 'ch', 'tone', 'freq', 'grad', 'jig', 'fourier', 'interp', 'geo', 'rs', 'bayer', 'cleanup'];
+  Pipeline.STAGE_ORDER = ['photo', 'ch', 'jig', 'interp', 'geo', 'rs', 'bayer', 'cleanup'];
 
   /* Runs one stage. opts: { status, tick, forExport }. */
   Pipeline.runStage = async function (img, id, P, k, opts) {
@@ -1457,7 +1437,6 @@
   Pipeline.stageOutputSize = function (w, h, id, P) {
     const full = { x0: 0, y0: 0, x1: w, y1: h };
     if (id === 'ch') { const V = validRect(w, h, P.ch, 1); return { w: V.x1 - V.x0, h: V.y1 - V.y0 }; }
-    if (id === 'fourier') { const F = P.fourier || {}, fd = Math.max(Math.abs(F.x || 0), Math.abs(F.y || 0)); const V = fd ? insetRect(full, fd + 2, w, h) : full; return { w: V.x1 - V.x0, h: V.y1 - V.y0 }; }
     if (id === 'interp') { const I = P.interp || {}, d = Math.max(Math.abs(I.x || 0), Math.abs(I.y || 0)) + (I.warp || 0) + (I.jitter || 0); const V = d ? insetRect(full, d + (I.kernel === 'lanczos3' ? 3 : I.kernel === 'bilinear' ? 1 : 2), w, h) : full; return { w: V.x1 - V.x0, h: V.y1 - V.y0 }; }
     if (id === 'geo') { if (P.geo.restoreSize) return { w, h }; const { rect } = frameFor(w, h, P.geo, null); return { w: Math.max(1, Math.round(rect.w)), h: Math.max(1, Math.round(rect.h)) }; }
     if (id === 'rs') { const s = (P.rs.outScale || 100) / 100; return { w: Math.max(1, Math.round(w * s)), h: Math.max(1, Math.round(h * s)) }; }

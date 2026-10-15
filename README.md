@@ -23,15 +23,7 @@ The tool is step-by-step. Each tab is one stage; its preview shows the **working
 
 **Colour channel shifts** — move each of the red, green and blue layers sideways (X), up/down (Y) and zoom it from the centre (Z), with sub-pixel precision. Edges that end up missing a colour are trimmed off the frame automatically.
 
-**Tone per channel** — shadows, midtones and highlights (lift / gamma / gain) for red, green and blue separately.
-
-**Frequency bands** — the image is split into three detail layers (fine / medium / coarse, with adjustable boundaries). Each layer has its own boost/cut, band-limited noise, blur, and edge-aware smoothing. A "show in the preview" switch lets you look at one layer alone.
-
-**Gradient perturbation** — smooth random drift of brightness and colour (adjustable patch size), a directional lighting tilt, and random edge jitter that strengthens or weakens edges in patches. All randomness comes from one "pattern number", so results are repeatable.
-
 **Invisible jigsaw** — flat blocks (sky, walls, skin, bokeh) are swapped with similar flat blocks nearby. By default only the grain moves and every block keeps its own average colour, so the swap is invisible even across gradients. Block size, flatness, similarity, search distance, amount, optional flips, and a preview-only outline of the swapped blocks.
-
-**Phase shift (Fourier translation)** — exact band-limited sub-pixel translation: each row and column goes through an FFT, a linear phase ramp and an inverse FFT (sinc interpolation). Lines are extended with a slope-continuous reflection and tapered inside the padding, so edges don't ring; integer shifts come back exact to 4 decimals.
 
 **Interpolation forcing** — a global fraction-of-a-pixel shift, a small smooth random warp, and an optional per-pixel random jitter, so every output pixel is a blend of neighbours at its own phase; bilinear, bicubic or Lanczos-3.
 
@@ -60,5 +52,5 @@ Every slider says in plain language what moving it left or right does.
 
 - Images above 20 megapixels are reduced on load to keep memory sane.
 - Pixel-unit settings (shifts, blur radii, patch sizes) are in full-resolution pixels; the preview scales them so what you see matches what you save.
-- Applying a step on a 12 MP photo takes from a fraction of a second (tone, jigsaw) to a few seconds (Fourier shift ≈4 s, Lanczos interpolation forcing); the page shows progress. Undo keeps the last three working images in memory.
+- Applying a step on a 12 MP photo takes from a fraction of a second (jigsaw, cleanup) to a few seconds (Lanczos interpolation forcing ≈2 s); the page shows progress. Undo keeps the last three working images in memory.
 - Output is always a fresh JPEG encode of the processed pixels, even with every slider at zero.
