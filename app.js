@@ -41,7 +41,7 @@
   const DEF = Pipeline.defaults();
   const P = Pipeline.defaults();
   const S = {
-    name: 'image', note: '',
+    name: 'image', fileName: '', lastSaved: '', note: '',
     original: null,                 // the image as loaded (full resolution)
     work: null, workVersion: 0,     // the working image: original + applied steps
     steps: [],                      // labels of applied steps
@@ -548,7 +548,9 @@
     try {
       const { img, note } = await blobToImage(blob);
       S.original = img; S.note = note;
-      S.name = (name || 'image').replace(/\.[a-z0-9]+$/i, '');
+      S.fileName = name || 'image';
+      S.name = S.fileName.replace(/\.[a-z0-9]+$/i, '');
+      S.lastSaved = '';
       setWork(img, true);
       $('#empty').hidden = true; $('#canvas-wrap').hidden = false;
       toast(`Loaded ${S.name} · ${img.w}×${img.h}`);
@@ -630,10 +632,12 @@
     const o = S.tab === 'out' ? { w: S.work.w, h: S.work.h } : Pipeline.stageOutputSize(S.work.w, S.work.h, S.tab, P);
     const sec = SECTION_BY_ID[S.tab];
     const pend = tabPending(S.tab);
-    let line = `working image ${S.work.w}×${S.work.h} (original ${S.original.w}×${S.original.h}${S.note}) · ${S.steps.length} step${S.steps.length === 1 ? '' : 's'} applied`;
+    let line = `${S.fileName} · ${S.original.w}×${S.original.h}${S.note}`;
+    if (S.lastSaved) line += ` · last saved as ${S.lastSaved}`;
+    line += `\nworking image ${S.work.w}×${S.work.h} · ${S.steps.length} step${S.steps.length === 1 ? '' : 's'} applied`;
     if (S.tab !== 'out') line += ` · ${sec.tab} tab: ${pend ? `pending → ${o.w}×${o.h}` : 'nothing set yet'}`;
     if (S.name === 'test-image') line += '\nThis is the built-in test picture. Open or drop your own image to edit it; it stays in this tab.';
-    info.textContent = line;
+    info.replaceChildren(el('span', { class: 'file-name', text: S.fileName }), document.createTextNode(line.slice(S.fileName.length)));
     const fr = $('#frame-readout');
     if (fr) { const f = Pipeline.stageOutputSize(S.work.w, S.work.h, 'geo', P); fr.textContent = `Frame: ${f.w} × ${f.h} px` + (f.w !== S.work.w || f.h !== S.work.h ? ` (from ${S.work.w} × ${S.work.h})` : ' (nothing trimmed)'); }
     const wr = $('#work-readout');
@@ -743,6 +747,7 @@
     const r = await deliverFile(blob, name);
     const pend = S.tab !== 'out' && tabPending(S.tab);
     $('#export-readout').textContent = r === 'saved' ? `Saved ${name} · ${img.w} × ${img.h} px${pend ? ` · includes the unapplied ${SECTION_BY_ID[S.tab].tab} settings` : ''}` : `Output ${img.w} × ${img.h} px (not saved)`;
+    if (r === 'saved') { S.lastSaved = name; updateInfo(); }
     toast(r === 'saved' ? `Saved ${name}` : 'Not saved');
   }
   $('#btn-download').addEventListener('click', downloadJpeg);

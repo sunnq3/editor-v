@@ -293,6 +293,8 @@ input[type=number] {
 .panel::-webkit-scrollbar, .stage-view::-webkit-scrollbar { width: 10px; height: 10px; }
 .panel::-webkit-scrollbar-thumb, .stage-view::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 999px; border: 2px solid var(--bg-2); }
 
+.stage-foot .file-name { color: #fff; font-weight: 600; }
+
 /* ---------- toast ---------- */
 .toast {
   position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translate(-50%, 20px);
