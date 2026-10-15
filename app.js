@@ -22,6 +22,11 @@
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const raf = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   const fmtBytes = (n) => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(2) + ' MB';
+  const usedNames = new Set();
+  function exportName() {
+    let n; do { n = String(1000 + Math.floor(Math.random() * 9000)); } while (usedNames.has(n) && usedNames.size < 9000);
+    usedNames.add(n); return n;
+  }
   let toastTimer = null;
   function toast(msg, kind) {
     const t = $('#toast'); t.textContent = msg; t.className = 'toast show' + (kind ? ' ' + kind : '');
@@ -39,7 +44,6 @@
     zoom: 'fit', previewMax: 1000, comparing: false,
     fullCache: null,                             // { key, img } for export
     rendering: false, pending: null, timer: null, fullTimer: null,
-    drag: null,
   };
 
   /* ---------------------------------------------------- browser scaler */
@@ -184,6 +188,7 @@
         slider('interp.y', 'Up / down shift', -1, 1, 0.01, 'px', 'picture moves up', 'picture moves down'),
         slider('interp.warp', 'Random warp', 0, 3, 0.05, 'px', 'no warp, the shift is the same everywhere', 'pixels drift up to this far in slowly varying directions'),
         slider('interp.warpCell', 'Warp patch size', 10, 600, 5, 'px', 'wobbly, small patches', 'broad, gentle bends'),
+        slider('interp.jitter', 'Per-pixel jitter', 0, 0.5, 0.01, 'px', 'every pixel sampled from the same offset', 'each pixel sampled from its own random offset (breaks any regular grid)'),
         select('interp.kernel', 'Interpolation method', [['bilinear', 'Bilinear — soft, 4 neighbours'], ['bicubic', 'Bicubic (Catmull-Rom) — sharp, 16 neighbours'], ['lanczos3', 'Lanczos-3 — sharpest, 36 neighbours, slow']], 'Which neighbours each new pixel is blended from.'),
         { type: 'row', controls: [button('New random pattern', reseed, { small: true }), button('Reset interpolation forcing', () => resetSection('interp'), { small: true })] },
       ],
@@ -205,21 +210,28 @@
     },
     {
       id: 'rs', title: 'Resampling',
-      blurb: 'Re-computes every pixel by scaling the picture to a temporary size and straight back. The dimensions stay the same, but each pixel value is re-interpolated. Can be done to the whole image and, separately, to one region.',
+      blurb: 'Re-computes every pixel by scaling the picture to a temporary size and straight back. The dimensions stay the same, but each pixel value is re-interpolated.',
       controls: [
         select('rs.kernel', 'Method (quality / kernel)', KERNEL_OPTIONS, 'Sharper methods keep more detail; softer ones smear fine detail. Also used for the final size and the "stretch back" option above.'),
         slider('rs.roundTrip', 'Whole image — temporary size', 25, 200, 1, '%', 'shrinks then enlarges back: loses fine detail, softer', 'enlarges then shrinks back: keeps detail, subtler change', { note: '100% = off. Every other value re-interpolates the whole picture.' }),
         slider('rs.outScale', 'Final output size', 10, 200, 1, '%', 'saved image gets smaller', 'saved image gets bigger'),
-        group('Region'),
-        check('rs.region.on', 'Resample a region on its own', 'Draw the region by dragging on the preview. It gets its own temporary size and method, blended back with a soft edge.'),
-        slider('rs.region.scale', 'Region — temporary size', 25, 200, 1, '%', 'region shrinks then enlarges back: softer', 'region enlarges then shrinks back: subtler'),
-        select('rs.region.kernel', 'Region method', KERNEL_OPTIONS),
-        slider('rs.region.feather', 'Soft edge', 0, 60, 1, 'px', 'hard edge (a seam may show)', 'wider blend into the surroundings'),
-        slider('rs.region.x', 'Region — left edge', 0, 0.95, 0.005, 'frac', 'region starts further left', 'region starts further right', { pct: true }),
-        slider('rs.region.y', 'Region — top edge', 0, 0.95, 0.005, 'frac', 'region starts higher', 'region starts lower', { pct: true }),
-        slider('rs.region.w', 'Region — width', 0.02, 1, 0.005, 'frac', 'narrower', 'wider', { pct: true }),
-        slider('rs.region.h', 'Region — height', 0.02, 1, 0.005, 'frac', 'shorter', 'taller', { pct: true }),
         button('Reset resampling', () => resetSection('rs'), { small: true }),
+      ],
+    },
+    {
+      id: 'bayer', title: 'Sensor grid (Bayer)',
+      blurb: 'Re-samples the picture the way a camera sensor sees it: each pixel keeps only one colour in a 2×2 red-green-green-blue mosaic, then the missing colours are rebuilt from the neighbours (demosaicing). The picture looks the same, but a sensor-like grid structure is stamped into every pixel. Works on the final pixel grid, after all other stages.',
+      controls: [
+        check('bayer.on', 'Re-sample through a Bayer mosaic', 'Turns the sensor simulation on.'),
+        seg('bayer.pattern', 'Mosaic layout', [['rggb', 'RGGB'], ['bggr', 'BGGR'], ['grbg', 'GRBG'], ['gbrg', 'GBRG']], 'Which colour sits top-left in each 2×2 cell. Same effect, different grid phase.'),
+        select('bayer.method', 'Rebuild method (demosaic)', [['mhc', 'Gradient-corrected (Malvar-He-Cutler) — what cameras use'], ['bilinear', 'Bilinear — softer, more colour fringing on edges']], 'How the two missing colours of each pixel are estimated from its neighbours.'),
+        slider('bayer.mix', 'Amount', 0, 100, 1, '%', 'original pixels', 'fully re-sampled through the mosaic'),
+        group('Ordered dither (Bayer matrix)'),
+        slider('bayer.dither', 'Dither strength', 0, 8, 0.25, 'levels', 'no pattern', 'stronger fixed checker-like pattern locked to the pixel grid'),
+        seg('bayer.ditherSize', 'Pattern size', [[2, '2 × 2'], [4, '4 × 4'], [8, '8 × 8']], 'How many pixels the threshold pattern repeats over.'),
+        check('bayer.ditherColor', 'Different pattern phase per colour channel', 'On: the pattern is offset for green and blue, giving a faint colour texture instead of a grey one.'),
+        note('The preview is a reduced image, so the grid there is only indicative; the saved file gets the exact 2 × 2 pattern on its real pixels.'),
+        button('Reset sensor grid', () => resetSection('bayer'), { small: true }),
       ],
     },
     {
@@ -296,9 +308,9 @@
     return el('div', { class: 'sel' }, el('label', { text: spec.label }), sel, spec.hint ? el('div', { class: 'hint single' }, el('span', { class: 'l', text: spec.hint })) : null);
   }
   function buildSeg(spec) {
-    const btns = spec.options.map(([v, t]) => el('button', { type: 'button', text: t, 'data-v': v }));
-    const update = () => { const cur = getPath(P, spec.path); btns.forEach((b) => b.classList.toggle('on', b.dataset.v === cur)); };
-    btns.forEach((b) => b.addEventListener('click', () => { setPath(P, spec.path, b.dataset.v); update(); onParamChange(spec.path, 'full'); }));
+    const btns = spec.options.map(([v, t]) => el('button', { type: 'button', text: t, 'data-v': String(v) }));
+    const update = () => { const cur = String(getPath(P, spec.path)); btns.forEach((b) => b.classList.toggle('on', b.dataset.v === cur)); };
+    btns.forEach((b, i) => b.addEventListener('click', () => { setPath(P, spec.path, spec.options[i][0]); update(); onParamChange(spec.path, 'full'); }));
     controls.set(spec.path, { spec, update });
     update();
     return el('div', { class: 'seg-ctl' }, el('div', { class: 'lbl', text: spec.label }), el('div', { class: 'segmented' }, ...btns), spec.hint ? el('div', { class: 'hint single' }, el('span', { class: 'l', text: spec.hint })) : null);
@@ -364,7 +376,6 @@
     if (path.startsWith('out.')) { if (S.fullCache) estimateSize(); return; }
     S.fullCache = null;
     $('#size-readout').textContent = '';
-    if (path.startsWith('rs.region')) { $('#ov').classList.toggle('active', P.rs.region.on); drawOverlay(); }
     updateInfo();
     schedule(mode);
   }
@@ -407,7 +418,6 @@
     if (cv.width !== imageData.width || cv.height !== imageData.height) { cv.width = imageData.width; cv.height = imageData.height; }
     cv.getContext('2d').putImageData(imageData, 0, 0);
     layoutCanvas();
-    drawOverlay();
   }
 
   /* ----------------------------------------------------------- layout */
@@ -425,7 +435,6 @@
       const scale = S.previewFull ? S.previewFull.k / (S.lastK || S.previewFull.k) : 1;
       cv.style.width = Math.round(cv.width * scale) + 'px'; cv.style.height = Math.round(cv.height * scale) + 'px';
     }
-    resizeOverlay();
   }
   new ResizeObserver(() => layoutCanvas()).observe($('#view'));
   $('#zoom-seg').addEventListener('click', (e) => {
@@ -434,49 +443,6 @@
     [...$('#zoom-seg').children].forEach((x) => x.classList.toggle('on', x === b));
     layoutCanvas();
   });
-
-  /* --------------------------------------------------- region overlay */
-  function resizeOverlay() {
-    const ov = $('#ov'), cv = $('#cv');
-    const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
-    if (ov.width !== w || ov.height !== h) { ov.width = w; ov.height = h; }
-    drawOverlay();
-  }
-  function drawOverlay() {
-    const ov = $('#ov'); const ctx = ov.getContext('2d');
-    ctx.clearRect(0, 0, ov.width, ov.height);
-    const R = P.rs.region;
-    if (!R.on || S.comparing) return;
-    const x = R.x * ov.width, y = R.y * ov.height, w = R.w * ov.width, h = R.h * ov.height;
-    ctx.fillStyle = 'rgba(4, 6, 14, 0.28)';
-    ctx.beginPath(); ctx.rect(0, 0, ov.width, ov.height); ctx.rect(x, y, w, h); ctx.fill('evenodd');
-    const dpr = window.devicePixelRatio || 1;
-    ctx.lineWidth = 1.5 * dpr; ctx.strokeStyle = '#8b7cf6'; ctx.setLineDash([6 * dpr, 4 * dpr]);
-    ctx.strokeRect(x, y, w, h);
-    ctx.setLineDash([]); ctx.fillStyle = '#4f8cff';
-    for (const [px, py] of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) { ctx.beginPath(); ctx.arc(px, py, 4 * dpr, 0, Math.PI * 2); ctx.fill(); }
-    ctx.fillStyle = 'rgba(232, 234, 247, 0.9)'; ctx.font = `${11 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
-    ctx.fillText('region — drag to redraw', x + 6 * dpr, y - 6 * dpr < 10 * dpr ? y + h + 14 * dpr : y - 6 * dpr);
-  }
-  const ov = $('#ov');
-  const ovPos = (e) => { const r = ov.getBoundingClientRect(); return [clamp((e.clientX - r.left) / r.width, 0, 1), clamp((e.clientY - r.top) / r.height, 0, 1)]; };
-  ov.addEventListener('pointerdown', (e) => {
-    if (!P.rs.region.on) return;
-    e.preventDefault(); ov.setPointerCapture(e.pointerId);
-    S.drag = { start: ovPos(e) };
-  });
-  ov.addEventListener('pointermove', (e) => {
-    if (!S.drag) return;
-    const [x0, y0] = S.drag.start, [x1, y1] = ovPos(e);
-    const R = P.rs.region;
-    R.x = Math.min(x0, x1); R.y = Math.min(y0, y1); R.w = Math.max(0.02, Math.abs(x1 - x0)); R.h = Math.max(0.02, Math.abs(y1 - y0));
-    for (const p of ['rs.region.x', 'rs.region.y', 'rs.region.w', 'rs.region.h']) controls.get(p).update();
-    drawOverlay();
-  });
-  const endDrag = (e) => { if (!S.drag) return; S.drag = null; onParamChange('rs.region.rect', 'full'); };
-  ov.addEventListener('pointerup', endDrag);
-  ov.addEventListener('pointercancel', endDrag);
 
   /* ------------------------------------------------------------ compare */
   const cmpBtn = $('#btn-compare');
@@ -672,14 +638,15 @@
     const img = await buildFull();
     const blob = await toJpegBlob(img, P.out.quality);
     $('#size-readout').textContent = `≈ ${fmtBytes(blob.size)} at quality ${P.out.quality}`;
-    const r = await deliverFile(blob, `${S.name}-edit-q${P.out.quality}.jpg`);
-    $('#export-readout').textContent = r === 'saved' ? `Saved ${img.w} × ${img.h} px` : `Output ${img.w} × ${img.h} px (not saved)`;
+    const name = exportName() + '.jpg';
+    const r = await deliverFile(blob, name);
+    $('#export-readout').textContent = r === 'saved' ? `Saved ${name} · ${img.w} × ${img.h} px` : `Output ${img.w} × ${img.h} px (not saved)`;
   }
 
   /* ----------------------------------------------------------- settings */
   function saveSettings() {
     const blob = new Blob([JSON.stringify(P, null, 2)], { type: 'application/json' });
-    deliverFile(blob, 'editor-v-settings.json');
+    deliverFile(blob, 'settings-' + exportName() + '.json');
   }
   function mergeInto(target, src, def) {
     for (const k of Object.keys(def)) {
@@ -698,12 +665,13 @@
       mergeInto(P, j, DEF);
       for (const c of controls.values()) if (c.spec.type === 'slider') setPath(P, c.spec.path, clamp(getPath(P, c.spec.path), c.spec.min, c.spec.max));
       if (!Pipeline.KERNELS[P.rs.kernel] && P.rs.kernel !== 'browser') P.rs.kernel = DEF.rs.kernel;
-      if (!Pipeline.KERNELS[P.rs.region.kernel] && P.rs.region.kernel !== 'browser') P.rs.region.kernel = DEF.rs.region.kernel;
       if (!['full', 'low', 'mid', 'high'].includes(P.freq.view)) P.freq.view = 'full';
       if (!['bilinear', 'bicubic', 'lanczos3'].includes(P.interp.kernel)) P.interp.kernel = DEF.interp.kernel;
       if (!['normal', 'highlight'].includes(P.jig.view)) P.jig.view = 'normal';
+      if (!['rggb', 'bggr', 'grbg', 'gbrg'].includes(P.bayer.pattern)) P.bayer.pattern = 'rggb';
+      if (!['mhc', 'bilinear'].includes(P.bayer.method)) P.bayer.method = 'mhc';
+      if (![2, 4, 8].includes(P.bayer.ditherSize)) P.bayer.ditherSize = 4;
       syncAll();
-      $('#ov').classList.toggle('active', P.rs.region.on);
       onParamChange('*', 'full');
     } catch (err) { toast('That file is not a valid settings file.', 'warn'); }
   });

@@ -107,8 +107,6 @@ kbd { font: 12px var(--mono); background: var(--panel-2); border: 1px solid var(
 .stage-view.dragover { outline: 2px dashed var(--accent); outline-offset: -8px; }
 .canvas-wrap { position: relative; margin: auto; line-height: 0; box-shadow: var(--shadow); }
 #cv { display: block; image-rendering: auto; background: #000; }
-#ov { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-#ov.active { pointer-events: auto; cursor: crosshair; }
 .empty { padding: 24px; }
 .empty-card {
   max-width: 440px; text-align: center; padding: 34px 28px;

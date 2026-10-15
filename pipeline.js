@@ -685,8 +685,11 @@
   /* Every pixel is re-read from a slightly different sub-pixel position: a
      global fractional shift plus a smooth random warp. */
   function interpForce(img, I, k, seed) {
-    const dx = (I.x || 0) * k, dy = (I.y || 0) * k, amp = (I.warp || 0) * k;
-    if (!dx && !dy && !amp) return img;
+    const dx = (I.x || 0) * k, dy = (I.y || 0) * k, amp = (I.warp || 0) * k, jit = (I.jitter || 0) * k;
+    if (!dx && !dy && !amp && !jit) return img;
+    const rnd = jit ? mulberry32(mixSeed(seed, 43)) : null;
+    let jx = null, jy = null;
+    if (jit) { jx = new Float32Array(img.w * img.h); jy = new Float32Array(img.w * img.h); for (let i = 0; i < jx.length; i++) { jx[i] = (rnd() * 2 - 1) * jit; jy[i] = (rnd() * 2 - 1) * jit; } }
     const { w, h } = img, N = w * h;
     const sample = SAMPLERS[I.kernel] || sampleBicubic;
     let fx = null, fy = null;
@@ -700,7 +703,7 @@
       const src = img[name], dst = out[name];
       for (let y = 0, i = 0; y < h; y++) {
         for (let x = 0; x < w; x++, i++) {
-          const sx = x - dx - (fx ? amp * fx[i] : 0), sy = y - dy - (fy ? amp * fy[i] : 0);
+          const sx = x - dx - (fx ? amp * fx[i] : 0) - (jx ? jx[i] : 0), sy = y - dy - (fy ? amp * fy[i] : 0) - (jy ? jy[i] : 0);
           dst[i] = sample(src, w, h, sx, sy);
         }
       }
@@ -723,7 +726,7 @@
     const F = P.fourier || {}, I = P.interp || {};
     const fd = Math.max(Math.abs(F.x || 0), Math.abs(F.y || 0));
     if (fd) V = insetRect(V, fd * k + 2, w, h);
-    const id = Math.max(Math.abs(I.x || 0), Math.abs(I.y || 0)) + (I.warp || 0);
+    const id = Math.max(Math.abs(I.x || 0), Math.abs(I.y || 0)) + (I.warp || 0) + (I.jitter || 0);
     if (id) V = insetRect(V, id * k + (I.kernel === 'lanczos3' ? 3 : I.kernel === 'bilinear' ? 1 : 2), w, h);
     return V;
   }
@@ -988,35 +991,98 @@
     return resampleImage(resampleImage(img, tw, th, kname), img.w, img.h, kname);
   }
 
-  /* Region resample: a rectangle (normalised 0..1 coordinates) gets its own
-     round-trip resample with its own kernel, blended back with soft edges. */
-  function regionResample(img, R, k) {
-    if (!R || !R.on || !R.scale || R.scale === 100) return img;
-    const { w, h } = img;
-    const clampI = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
-    const x0 = clampI(R.x * w, 0, w - 1), y0 = clampI(R.y * h, 0, h - 1);
-    const x1 = clampI((R.x + R.w) * w, x0 + 1, w), y1 = clampI((R.y + R.h) * h, y0 + 1, h);
-    const rw = x1 - x0, rh = y1 - y0;
-    if (rw < 2 || rh < 2) return img;
-    const sub = makeImage(rw, rh);
-    for (const name of CH) for (let y = 0; y < rh; y++) sub[name].set(img[name].subarray((y + y0) * w + x0, (y + y0) * w + x1), y * rw);
-    const res = roundTrip(sub, R.scale, R.kernel || 'bilinear');
-    const feather = Math.max(0, (R.feather || 0) * k);
-    const out = cloneImage(img);
-    for (let y = 0; y < rh; y++) {
-      const dy = Math.min(y, rh - 1 - y) + 0.5;
-      for (let x = 0; x < rw; x++) {
-        let m = 1;
-        if (feather > 0) { const d = Math.min(dy, Math.min(x, rw - 1 - x) + 0.5); m = Math.min(1, d / feather); }
-        const si = y * rw + x, di = (y + y0) * w + x + x0;
-        out.r[di] += (res.r[si] - out.r[di]) * m;
-        out.g[di] += (res.g[si] - out.g[di]) * m;
-        out.b[di] += (res.b[si] - out.b[di]) * m;
+  /* ------------------------------------------ 6. sensor grid (Bayer) */
+  /* Re-samples the picture through a 2×2 colour-filter mosaic (one colour per
+     pixel) and rebuilds the missing colours, the way a camera does. */
+  const CFA = { rggb: ['r', 'g', 'g', 'b'], bggr: ['b', 'g', 'g', 'r'], grbg: ['g', 'r', 'b', 'g'], gbrg: ['g', 'b', 'r', 'g'] };
+  function bayerMosaic(img, pattern) {
+    const { w, h } = img, m = new Float32Array(w * h);
+    const cfa = CFA[pattern] || CFA.rggb;
+    for (let y = 0; y < h; y++) {
+      const row = y * w, ry = (y & 1) * 2;
+      const c0 = img[cfa[ry]], c1 = img[cfa[ry + 1]];
+      for (let x = 0; x < w; x++) m[row + x] = (x & 1) ? c1[row + x] : c0[row + x];
+    }
+    return m;
+  }
+  /* Malvar-He-Cutler gradient-corrected linear demosaicing (5×5 filters), or
+     plain bilinear. Returns a full image. */
+  function demosaic(m, w, h, pattern, method) {
+    const cfa = CFA[pattern] || CFA.rggb;
+    const out = makeImage(w, h);
+    const at = (x, y) => { if (x < 0) x = -x; else if (x >= w) x = 2 * w - 2 - x; if (y < 0) y = -y; else if (y >= h) y = 2 * h - 2 - y; return m[y * w + x]; };
+    const mhc = method !== 'bilinear';
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const c = cfa[(y & 1) * 2 + (x & 1)];           // colour this pixel carries
+        const v = m[y * w + x];
+        const N = at(x, y - 1), S = at(x, y + 1), E = at(x + 1, y), W = at(x - 1, y);
+        const NE = at(x + 1, y - 1), NW = at(x - 1, y - 1), SE = at(x + 1, y + 1), SW = at(x - 1, y + 1);
+        const N2 = at(x, y - 2), S2 = at(x, y + 2), E2 = at(x + 2, y), W2 = at(x - 2, y);
+        let r, g, b;
+        if (c === 'g') {
+          g = v;
+          // which non-green colour sits to the left/right of this green?
+          const horiz = cfa[(y & 1) * 2 + ((x + 1) & 1)];  // colour of the horizontal neighbours
+          let hVal, vVal;
+          if (mhc) {
+            hVal = (5 * v + 4 * (E + W) - (NE + NW + SE + SW) - (E2 + W2) + 0.5 * (N2 + S2)) / 8;
+            vVal = (5 * v + 4 * (N + S) - (NE + NW + SE + SW) - (N2 + S2) + 0.5 * (E2 + W2)) / 8;
+          } else { hVal = (E + W) / 2; vVal = (N + S) / 2; }
+          if (horiz === 'r') { r = hVal; b = vVal; } else { b = hVal; r = vVal; }
+        } else {
+          const gv = mhc ? (4 * v + 2 * (N + S + E + W) - (N2 + S2 + E2 + W2)) / 8 : (N + S + E + W) / 4;
+          const dv = mhc ? (6 * v + 2 * (NE + NW + SE + SW) - 1.5 * (N2 + S2 + E2 + W2)) / 8 : (NE + NW + SE + SW) / 4;
+          g = gv;
+          if (c === 'r') { r = v; b = dv; } else { b = v; r = dv; }
+        }
+        const i = y * w + x;
+        out.r[i] = r; out.g[i] = g; out.b[i] = b;
       }
     }
     return out;
   }
-  Pipeline.regionResample = regionResample;
+  const BAYER2 = [[0, 2], [3, 1]];
+  function bayerMatrix(n) {
+    let M = BAYER2;
+    while (M.length < n) {
+      const s = M.length, next = [];
+      for (let y = 0; y < 2 * s; y++) { next.push([]); for (let x = 0; x < 2 * s; x++) next[y].push(4 * M[y % s][x % s] + BAYER2[(y / s) | 0][(x / s) | 0]); }
+      M = next;
+    }
+    return M;
+  }
+  function sensorGrid(img, Bp) {
+    if (!Bp) return img;
+    const { w, h } = img, N = w * h;
+    let out = img;
+    if (Bp.on && Bp.mix > 0 && w >= 4 && h >= 4) {
+      const dem = demosaic(bayerMosaic(img, Bp.pattern), w, h, Bp.pattern, Bp.method);
+      const t = Math.min(1, Bp.mix / 100);
+      if (t >= 1) out = dem;
+      else {
+        out = cloneImage(img);
+        for (const name of CH) { const a = out[name], d = dem[name]; for (let i = 0; i < N; i++) a[i] += (d[i] - a[i]) * t; }
+      }
+    }
+    if (Bp.dither > 0) {
+      const n = Bp.ditherSize === 2 ? 2 : Bp.ditherSize === 8 ? 8 : 4;
+      const M = bayerMatrix(n), n2 = n * n, amp = Bp.dither;
+      if (out === img) out = cloneImage(img);
+      CH.forEach((name, ci) => {
+        const ch = out[name];
+        const ox = Bp.ditherColor ? ci : 0, oy = Bp.ditherColor ? (ci * 2) % n : 0;
+        for (let y = 0; y < h; y++) {
+          const Mrow = M[(y + oy) % n], row = y * w;
+          for (let x = 0; x < w; x++) ch[row + x] += amp * ((Mrow[(x + ox) % n] + 0.5) / n2 - 0.5) * 2;
+        }
+      });
+    }
+    return out;
+  }
+  Pipeline.sensorGrid = sensorGrid;
+  Pipeline.demosaic = demosaic;
+  Pipeline.bayerMosaic = bayerMosaic;
 
   /* ------------------------------------------------------- the run */
   Pipeline.defaults = function () {
@@ -1033,12 +1099,10 @@
       grad: { drift: 0, driftCell: 300, driftColor: true, tilt: 0, tiltAngle: 0, jitter: 0, jitterCell: 120 },
       jig: { on: false, block: 16, homog: 6, tol: 12, radius: 6, amount: 100, keepTone: true, flip: false, view: 'normal' },
       fourier: { x: 0, y: 0 },
-      interp: { x: 0, y: 0, warp: 0, warpCell: 90, kernel: 'bicubic' },
+      interp: { x: 0, y: 0, warp: 0, warpCell: 90, jitter: 0, kernel: 'bicubic' },
       geo: { rotate: 0, tiltX: 0, tiltY: 0, crop: 0, posX: 0, posY: 0, restoreSize: false },
-      rs: {
-        kernel: 'lanczos3', roundTrip: 100, outScale: 100,
-        region: { on: false, x: 0.3, y: 0.3, w: 0.4, h: 0.4, scale: 100, kernel: 'bilinear', feather: 12 },
-      },
+      rs: { kernel: 'lanczos3', roundTrip: 100, outScale: 100 },
+      bayer: { on: false, pattern: 'rggb', method: 'mhc', mix: 100, dither: 0, ditherSize: 4, ditherColor: false },
       out: { quality: 92 },
     };
   };
@@ -1082,7 +1146,9 @@
     await stage('Resampling…');
     img = roundTrip(img, P.rs.roundTrip, P.rs.kernel);
     if (P.rs.outScale && P.rs.outScale !== 100) img = resampleImage(img, img.w * P.rs.outScale / 100, img.h * P.rs.outScale / 100, P.rs.kernel);
-    img = regionResample(img, P.rs.region, k);
+
+    await stage('Sensor grid…');
+    img = sensorGrid(img, P.bayer);
 
     img.jigStats = jigStats;
     return img;
