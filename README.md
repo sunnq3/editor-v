@@ -17,6 +17,8 @@ The tool is step-by-step. Each tab is one stage; its preview shows the **working
 
 ## The stages
 
+**Edit photo** — the usual developing controls, on luminance only so colours never shift: sharpen (amount, radius, edge masking), reduce luminance noise (edge-preserving), reduce colour noise, texture (±, medium-fine detail band), and grain (amount, size, roughness, optional colour).
+
 **Colour channel shifts** — move each of the red, green and blue layers sideways (X), up/down (Y) and zoom it from the centre (Z), with sub-pixel precision. Edges that end up missing a colour are trimmed off the frame automatically.
 
 **Tone per channel** — shadows, midtones and highlights (lift / gamma / gain) for red, green and blue separately.

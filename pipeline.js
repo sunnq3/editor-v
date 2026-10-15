@@ -1131,6 +1131,7 @@
   Pipeline.defaults = function () {
     return {
       seed: 1234,
+      photo: { sharpen: 0, radius: 1, masking: 0, nrLuma: 0, nrColor: 0, texture: 0, grain: 0, grainSize: 1, grainRough: 0, grainColor: false },
       ch: { r: { x: 0, y: 0, z: 0 }, g: { x: 0, y: 0, z: 0 }, b: { x: 0, y: 0, z: 0 } },
       tone: { r: { shadows: 0, midtones: 0, highlights: 0 }, g: { shadows: 0, midtones: 0, highlights: 0 }, b: { shadows: 0, midtones: 0, highlights: 0 } },
       freq: {
@@ -1150,6 +1151,100 @@
     };
   };
 
+  /* ------------------------------------------------- 0. photo edits */
+  /* Classic developing controls, done on luminance (YCbCr) so colours stay put:
+     noise reduction (luminance, colour), texture, sharpening with edge
+     masking, and film-like grain. */
+  function toYCbCr(img) {
+    const N = img.w * img.h, Y = new Float32Array(N), Cb = new Float32Array(N), Cr = new Float32Array(N);
+    const r = img.r, g = img.g, b = img.b;
+    for (let i = 0; i < N; i++) {
+      Y[i] = 0.299 * r[i] + 0.587 * g[i] + 0.114 * b[i];
+      Cb[i] = -0.168736 * r[i] - 0.331264 * g[i] + 0.5 * b[i];
+      Cr[i] = 0.5 * r[i] - 0.418688 * g[i] - 0.081312 * b[i];
+    }
+    return { Y, Cb, Cr };
+  }
+  function fromYCbCr(Y, Cb, Cr, w, h) {
+    const out = makeImage(w, h), N = w * h;
+    for (let i = 0; i < N; i++) {
+      out.r[i] = Y[i] + 1.402 * Cr[i];
+      out.g[i] = Y[i] - 0.344136 * Cb[i] - 0.714136 * Cr[i];
+      out.b[i] = Y[i] + 1.772 * Cb[i];
+    }
+    return out;
+  }
+  function photoActive(E) { return !!(E && (E.sharpen || E.nrLuma || E.nrColor || E.texture || E.grain)); }
+  function photoEdit(img, E, k, seed) {
+    if (!photoActive(E)) return img;
+    const { w, h } = img, N = w * h;
+    let { Y, Cb, Cr } = toYCbCr(img);
+    // 1. noise reduction
+    if (E.nrLuma > 0) {
+      Y = bilateral(Y, w, h, E.nrLuma * 0.4);
+      if (E.nrLuma > 50) Y = bilateral(Y, w, h, (E.nrLuma - 50) * 0.4);
+    }
+    if (E.nrColor > 0) {
+      const s = E.nrColor / 100;
+      Cb = bilateral(Cb, w, h, 20 + E.nrColor * 0.6); Cr = bilateral(Cr, w, h, 20 + E.nrColor * 0.6);
+      const sig = s * 3.5 * k;
+      if (sig > 0.3) { Cb = gaussBlur(Cb, w, h, sig); Cr = gaussBlur(Cr, w, h, sig); }
+    }
+    // 2. texture: mid-fine detail band on luminance
+    if (E.texture) {
+      const b1 = gaussBlur(Y, w, h, 1.2 * k), b2 = gaussBlur(Y, w, h, 5 * k), t = E.texture / 100 * 1.6;
+      for (let i = 0; i < N; i++) Y[i] += t * (b1[i] - b2[i]);
+    }
+    // 3. sharpen: unsharp mask with optional edge masking
+    if (E.sharpen > 0) {
+      const radius = Math.max(0.3, (E.radius || 1) * k);
+      const b = gaussBlur(Y, w, h, radius), amt = E.sharpen / 100;
+      let mask = null;
+      if (E.masking > 0) {
+        const t = E.masking / 100 * 14, g = gaussBlur(Y, w, h, 1 * k);
+        mask = new Float32Array(N);
+        for (let y = 0; y < h; y++) {
+          const y0 = y > 0 ? y - 1 : 0, y1 = y < h - 1 ? y + 1 : h - 1;
+          for (let x = 0; x < w; x++) {
+            const x0 = x > 0 ? x - 1 : 0, x1 = x < w - 1 ? x + 1 : w - 1;
+            const gx = (g[y * w + x1] - g[y * w + x0]) * 0.5, gy = (g[y1 * w + x] - g[y0 * w + x]) * 0.5;
+            let m = (Math.sqrt(gx * gx + gy * gy) - t) / 3 + 0.5;
+            mask[y * w + x] = m < 0 ? 0 : m > 1 ? 1 : m;
+          }
+        }
+      }
+      for (let i = 0; i < N; i++) Y[i] += amt * (Y[i] - b[i]) * (mask ? mask[i] : 1);
+    }
+    // 4. grain
+    if (E.grain > 0) {
+      const amp = E.grain / 100 * 24;
+      const makeNoise = (salt) => {
+        const rnd = mulberry32(mixSeed(seed || 0, salt));
+        let n = new Float32Array(N);
+        for (let i = 0; i < N; i += 2) {
+          const u1 = Math.max(1e-12, rnd()), u2 = rnd(), rad = Math.sqrt(-2 * Math.log(u1));
+          n[i] = rad * Math.cos(2 * Math.PI * u2); if (i + 1 < N) n[i + 1] = rad * Math.sin(2 * Math.PI * u2);
+        }
+        const size = Math.max(1, E.grainSize || 1);
+        if (size > 1) { n = gaussBlur(n, w, h, (size - 1) * 0.7 * k); const sd = stdOf(n) || 1; for (let i = 0; i < N; i++) n[i] /= sd; }
+        return n;
+      };
+      let rough = null;
+      if (E.grainRough > 0) {
+        const [nx, ny] = cellsFor(w / k, h / k, 40);
+        rough = noiseField(w, h, nx, ny, mixSeed(seed || 0, 73));
+      }
+      const nY = makeNoise(71), r = (E.grainRough || 0) / 100;
+      for (let i = 0; i < N; i++) Y[i] += amp * nY[i] * (rough ? 1 + r * rough[i] : 1);
+      if (E.grainColor) {
+        const nB = makeNoise(72), nR = makeNoise(74);
+        for (let i = 0; i < N; i++) { const a = amp * 0.5 * (rough ? 1 + r * rough[i] : 1); Cb[i] += a * nB[i]; Cr[i] += a * nR[i]; }
+      }
+    }
+    return fromYCbCr(Y, Cb, Cr, w, h);
+  }
+  Pipeline.photoEdit = photoEdit;
+
   /* ------------------------------------------------------ stages */
   function cropImage(img, V) {
     const { w, h } = img;
@@ -1165,6 +1260,7 @@
      stages that smear edges (channel shift, phase shift, interpolation
      forcing) trim themselves, so the result never carries a bad border. */
   const STAGES = {
+    photo: { label: 'Developing (edit photo)…', run: (img, P, k) => photoEdit(img, P.photo || {}, k, P.seed) },
     ch: { label: 'Shifting colour channels…', run: (img, P, k) => cropImage(channelShift(img, P.ch, k).img, validRect(img.w, img.h, P.ch, k)) },
     tone: { label: 'Adjusting tone per channel…', run: (img, P) => toneAdjust(img, P.tone || {}) },
     freq: { label: 'Editing frequency bands…', run: (img, P, k, o) => frequencyEdit(img, P.freq, k, P.seed, o.forExport ? 'full' : P.freq.view) },
@@ -1205,7 +1301,7 @@
     },
     bayer: { label: 'Bayer sensor grid…', run: (img, P, k) => sensorGrid(img, P.bayer, k, P.seed) },
   };
-  Pipeline.STAGE_ORDER = ['ch', 'tone', 'freq', 'grad', 'jig', 'fourier', 'interp', 'geo', 'rs', 'bayer'];
+  Pipeline.STAGE_ORDER = ['photo', 'ch', 'tone', 'freq', 'grad', 'jig', 'fourier', 'interp', 'geo', 'rs', 'bayer'];
 
   /* Runs one stage. opts: { status, tick, forExport }. */
   Pipeline.runStage = async function (img, id, P, k, opts) {

@@ -122,6 +122,27 @@
 
   const SECTIONS = [
     {
+      id: 'photo', tab: 'Edit', title: 'Edit photo',
+      blurb: 'The usual developing controls. They work on brightness only (the colour information is left alone), so sharpening and noise reduction never shift colours.',
+      controls: [
+        group('Sharpen'),
+        slider('photo.sharpen', 'Amount', 0, 150, 1, '%', 'no sharpening', 'edges and detail get crisper (too far looks crunchy)'),
+        slider('photo.radius', 'Radius', 0.5, 3, 0.1, 'px', 'only the finest edges are sharpened', 'wider halos around edges, bolder look'),
+        slider('photo.masking', 'Masking', 0, 100, 1, '', 'everything is sharpened, flat areas included', 'only clear edges are sharpened; skin, sky and noise are left alone'),
+        group('Reduce noise'),
+        slider('photo.nrLuma', 'Luminance noise', 0, 100, 1, '', 'grain stays as it is', 'speckle is smoothed away while edges are kept'),
+        slider('photo.nrColor', 'Colour noise', 0, 100, 1, '', 'colour speckle stays', 'coloured blotches are averaged out'),
+        group('Texture'),
+        slider('photo.texture', 'Texture', -100, 100, 1, '', 'medium-fine detail is softened (smoother skin, fabric)', 'medium-fine detail is emphasised (pores, bark, cloth)'),
+        group('Grain'),
+        slider('photo.grain', 'Amount', 0, 100, 1, '', 'no grain', 'heavier film-like grain'),
+        slider('photo.grainSize', 'Size', 1, 3, 0.1, '', 'fine, single-pixel grain', 'bigger, softer clumps'),
+        slider('photo.grainRough', 'Roughness', 0, 100, 1, '', 'even grain everywhere', 'uneven grain, denser in random patches'),
+        check('photo.grainColor', 'Colour grain', 'On: the grain also has slight colour, like colour film. Off: neutral grain, like black-and-white film.'),
+        button('New random pattern', reseed, { small: true }),
+      ],
+    },
+    {
       id: 'ch', tab: 'Channels', title: 'Colour channel shifts',
       blurb: 'Moves and zooms the red, green and blue layers separately, like the colour fringing of a cheap lens. Any edge that ends up missing a colour is trimmed off automatically, so no smeared borders.',
       controls: [...channelControls()],
@@ -860,7 +881,7 @@
 
   /* --------------------------------------------------------------- init */
   syncAll();
-  showTab('ch');
+  showTab('photo');
   setStatus('loading the test picture…');
   loadTestImage();
 })();
