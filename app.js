@@ -268,6 +268,24 @@
       ],
     },
     {
+      id: 'cleanup', tab: 'Cleanup', title: 'Cleanup / repair',
+      blurb: 'Removes the junk that heavy layering leaves in an image — resampling ringing, grid checker, JPEG blocking, gradient banding, colour speckle and impossible colours. All of it works on brightness and colour separately, so nothing shifts hue. Best used as a finishing pass; apply it last.',
+      controls: [
+        group('Ringing & checkerboard'),
+        slider('cleanup.dering', 'Tame ringing / grid', 0, 100, 1, '', 'left as it is', 'the fine oscillation in flat areas is smoothed away; real edges and texture are kept'),
+        group('JPEG blocking'),
+        slider('cleanup.deblock', 'Soften 8-px blocks', 0, 100, 1, '', 'block edges stay', 'the faint grid left by compression is smoothed, real edges untouched'),
+        group('Banding'),
+        slider('cleanup.deband', 'Remove banding', 0, 100, 1, '', 'smooth gradients keep their steps', 'flat gradients get tiny dither so the bands dissolve; detail is left alone'),
+        group('Colour'),
+        slider('cleanup.chroma', 'Clean colour speckle', 0, 100, 1, '', 'colour noise and fringing stay', 'stray colour is averaged out while brightness is untouched'),
+        check('cleanup.chromaEdge', 'Keep colour edges sharp', 'On: smooths colour but protects real colour boundaries (edge-aware). Off: a plain, slightly softer colour blur.'),
+        slider('cleanup.gamut', 'Fix impossible colours', 0, 100, 1, '', 'out-of-range colours are hard-clipped (can shift hue)', 'out-of-range colours are pulled back by reducing saturation, keeping the hue'),
+        note('Deband uses the pattern number. The preview is a reduced image, so blocking and ringing there are only indicative; apply or download to clean the real pixels.'),
+        button('New random pattern', reseed, { small: true }),
+      ],
+    },
+    {
       id: 'out', tab: 'Save', title: 'Save & steps',
       blurb: 'Saves the working image as a JPEG at full resolution. Saving goes through the browser\'s own encoder, which also drops any camera metadata (EXIF, GPS…). The Download button on the top bar does the same from any tab.',
       controls: [
@@ -366,7 +384,11 @@
         el('div', { class: 'group-title', text: 'JPEG round trip' }),
         el('div', { class: 'row' }, rt),
         el('div', { class: 'hint single' }, el('span', { class: 'l', text: 'Encodes the working image as a JPEG at the quality above and decodes it straight back, so the compression itself becomes part of the image before the next step. Same as downloading and re-opening the file, without leaving the page.' }))),
-      el('div', { class: 'group' }, el('div', { class: 'group-title', text: 'Applied steps' }), el('ol', { class: 'steps', id: 'steps-list' })),
+      el('div', { class: 'group' }, el('div', { class: 'group-title', text: 'Applied steps' }),
+        el('div', { class: 'row' },
+          el('button', { class: 'btn small ghost js-undo', type: 'button', text: 'Undo last step', onclick: undoStep }),
+          el('button', { class: 'btn small ghost js-revert', type: 'button', text: 'Revert to original', onclick: revertAll })),
+        el('ol', { class: 'steps', id: 'steps-list' })),
       el('div', { class: 'group' }, el('div', { class: 'group-title', text: 'Random pattern' }), buildSeed()),
       el('div', { class: 'group' }, el('div', { class: 'group-title', text: 'Settings' }), el('div', { class: 'row' }, reset, save, load)),
     );
@@ -409,8 +431,8 @@
   wfCheck.addEventListener('change', () => { S.wf.resample = wfCheck.checked; });
   wfPct.addEventListener('change', () => { S.wf.pct = clamp(Math.round(+wfPct.value || 97), 25, 200); wfPct.value = S.wf.pct; });
   wfKernel.addEventListener('change', () => { S.wf.kernel = wfKernel.value; });
-  const undoBtn = el('button', { class: 'btn small ghost', type: 'button', id: 'btn-undo', text: 'Undo last step', onclick: undoStep });
-  const revertBtn = el('button', { class: 'btn small ghost', type: 'button', id: 'btn-revert', text: 'Revert to original', onclick: revertAll });
+  const undoBtn = el('button', { class: 'btn small ghost js-undo', type: 'button', text: 'Undo last step', onclick: undoStep });
+  const revertBtn = el('button', { class: 'btn small ghost js-revert', type: 'button', text: 'Revert to original', onclick: revertAll });
   const applyRows = el('div', { id: 'apply-rows' },
     el('div', { class: 'row' }, applyBtn, dlStepBtn, resetBtn,
       el('label', { class: 'wf', title: 'After applying, re-interpolate every pixel by scaling to this temporary size and back with this method' }, wfCheck, document.createTextNode(' then resample via '), wfPct, document.createTextNode(' % '), wfKernel)));
@@ -423,7 +445,7 @@
     S.tab = id;
     for (const [k, b] of tabButtons) b.classList.toggle('on', k === id);
     for (const [k, body] of tabBodies) body.hidden = k !== id;
-    applyRows.hidden = id === 'out';
+    applyBar.hidden = id === 'out';
     S.fullCache = null;
     updateTabDots(); updateInfo();
     bodyWrap.scrollTop = 0; panel.scrollTop = 0;
@@ -696,8 +718,8 @@
     if (fr) { const f = Pipeline.stageOutputSize(S.work.w, S.work.h, 'geo', P); fr.textContent = `Frame: ${f.w} × ${f.h} px` + (f.w !== S.work.w || f.h !== S.work.h ? ` (from ${S.work.w} × ${S.work.h})` : ' (nothing trimmed)'); }
     const wr = $('#work-readout');
     if (wr) wr.textContent = `Working image ${S.work.w}×${S.work.h} · ${S.steps.length} step${S.steps.length === 1 ? '' : 's'} applied`;
-    $('#btn-undo').disabled = !S.undo.length;
-    $('#btn-revert').disabled = !S.steps.length;
+    document.querySelectorAll('.js-undo').forEach((b) => { b.disabled = !S.undo.length; });
+    document.querySelectorAll('.js-revert').forEach((b) => { b.disabled = !S.steps.length; });
     applyBtn.disabled = !pend;
   }
   function updateSteps() {

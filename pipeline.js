@@ -1132,6 +1132,7 @@
     return {
       seed: 1234,
       photo: { sharpen: 0, radius: 1, masking: 0, nrLuma: 0, nrColor: 0, texture: 0, grain: 0, grainSize: 1, grainRough: 0, grainColor: false },
+      cleanup: { dering: 0, deblock: 0, blockSize: 8, deband: 0, chroma: 0, chromaEdge: true, gamut: 0 },
       ch: { r: { x: 0, y: 0, z: 0 }, g: { x: 0, y: 0, z: 0 }, b: { x: 0, y: 0, z: 0 } },
       tone: { r: { shadows: 0, midtones: 0, highlights: 0 }, g: { shadows: 0, midtones: 0, highlights: 0 }, b: { shadows: 0, midtones: 0, highlights: 0 } },
       freq: {
@@ -1245,6 +1246,143 @@
   }
   Pipeline.photoEdit = photoEdit;
 
+  /* ----------------------------------------- 0b. cleanup / repair */
+  /* Removes the junk that heavy layering leaves behind, all on luminance /
+     chroma so nothing shifts hue: resampling ringing & grid checker, 8-px
+     JPEG blocking, gradient banding, chroma speckle, and out-of-gamut colour. */
+  function median3(src, w, h) {
+    const out = new Float32Array(w * h);
+    const v = new Float32Array(9);
+    // partial selection: we only need the 5th-smallest of 9
+    const med9 = () => {
+      for (let a = 0; a < 5; a++) {
+        let m = a;
+        for (let b = a + 1; b < 9; b++) if (v[b] < v[m]) m = b;
+        const t = v[a]; v[a] = v[m]; v[m] = t;
+      }
+      return v[4];
+    };
+    for (let y = 0; y < h; y++) {
+      const y0 = y > 0 ? y - 1 : 0, y1 = y, y2 = y < h - 1 ? y + 1 : h - 1;
+      for (let x = 0; x < w; x++) {
+        const x0 = x > 0 ? x - 1 : 0, x1 = x, x2 = x < w - 1 ? x + 1 : w - 1;
+        v[0] = src[y0 * w + x0]; v[1] = src[y0 * w + x1]; v[2] = src[y0 * w + x2];
+        v[3] = src[y1 * w + x0]; v[4] = src[y1 * w + x1]; v[5] = src[y1 * w + x2];
+        v[6] = src[y2 * w + x0]; v[7] = src[y2 * w + x1]; v[8] = src[y2 * w + x2];
+        out[y * w + x] = med9();
+      }
+    }
+    return out;
+  }
+  Pipeline.median3 = median3;
+
+  /* Softens discontinuities on the `block`-pixel grid, but only where the step
+     is small (a compression edge, not a real one). */
+  function deblock(Y, w, h, strength, block) {
+    const out = new Float32Array(Y);
+    const T = 3 + strength * 0.25, a = Math.min(0.5, strength / 100 * 0.5);
+    // vertical boundaries (columns)
+    for (let c = block; c < w; c += block) {
+      for (let y = 0; y < h; y++) {
+        const i = y * w + c, d = out[i] - out[i - 1];
+        if (d === 0 || Math.abs(d) > T) continue;
+        const act = Math.abs(out[i - 1] - (c - 2 >= 0 ? out[i - 2] : out[i - 1])) + Math.abs((c + 1 < w ? out[i + 1] : out[i]) - out[i]);
+        if (act > T * 1.5) continue;                 // busy neighbourhood: leave it
+        out[i] -= d * a; out[i - 1] += d * a;
+      }
+    }
+    // horizontal boundaries (rows)
+    for (let r = block; r < h; r += block) {
+      for (let x = 0; x < w; x++) {
+        const i = r * w + x, j = (r - 1) * w + x, d = out[i] - out[j];
+        if (d === 0 || Math.abs(d) > T) continue;
+        const act = Math.abs(out[j] - (r - 2 >= 0 ? out[(r - 2) * w + x] : out[j])) + Math.abs((r + 1 < h ? out[(r + 1) * w + x] : out[i]) - out[i]);
+        if (act > T * 1.5) continue;
+        out[i] -= d * a; out[j] += d * a;
+      }
+    }
+    return out;
+  }
+  Pipeline.deblock = deblock;
+
+  /* Adds tiny dither where the image is locally flat, so smooth gradients stop
+     stepping into visible bands; detailed areas are left alone. */
+  function deband(Y, w, h, strength, k, seed) {
+    const out = new Float32Array(Y), amp = strength / 100 * 2.2;
+    const rnd = mulberry32(mixSeed(seed || 0, 81));
+    const flatT = 3.5;
+    for (let y = 0; y < h; y++) {
+      const y0 = y > 0 ? y - 1 : 0, y1 = y < h - 1 ? y + 1 : h - 1;
+      for (let x = 0; x < w; x++) {
+        const x0 = x > 0 ? x - 1 : 0, x1 = x < w - 1 ? x + 1 : w - 1;
+        const gx = (Y[y * w + x1] - Y[y * w + x0]) * 0.5, gy = (Y[y1 * w + x] - Y[y0 * w + x]) * 0.5;
+        const g = Math.sqrt(gx * gx + gy * gy);
+        const flat = g >= flatT ? 0 : 1 - g / flatT;
+        if (flat <= 0) continue;
+        // triangular dither (sum of two uniforms) blends better than flat noise
+        out[y * w + x] += amp * flat * (rnd() + rnd() - 1);
+      }
+    }
+    return out;
+  }
+  Pipeline.deband = deband;
+
+  /* Pulls out-of-range pixels back into gamut by reducing their saturation
+     (keeping luminance), which avoids the hue shifts a hard RGB clip causes. */
+  function gamutSafe(Y, Cb, Cr, w, h, amount) {
+    const N = w * h;
+    for (let i = 0; i < N; i++) {
+      const y = Y[i], cb = Cb[i], cr = Cr[i];
+      let r = y + 1.402 * cr, g = y - 0.344136 * cb - 0.714136 * cr, b = y + 1.772 * cb;
+      if (r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255) continue;
+      // largest s in [0,1] with y + s*(channel-y) inside [0,255]
+      let s = 1;
+      const fit = (v) => { if (v < 0) s = Math.min(s, (y <= 0 || y === v) ? 0 : y / (y - v)); else if (v > 255) s = Math.min(s, (y >= 255 || y === v) ? 0 : (255 - y) / (v - y)); };
+      fit(r); fit(g); fit(b);
+      if (s < 0) s = 0; if (s > 1) s = 1;
+      s = 1 - (1 - s) * amount;                      // amount lets it be partial
+      Cb[i] = cb * s; Cr[i] = cr * s;
+    }
+  }
+  Pipeline.gamutSafe = gamutSafe;
+
+  /* Attenuates the finest luminance band where there is no real structure —
+     exactly the flat-area oscillation that is resampling ringing and grid
+     checker — while leaving true edges and textured detail intact. */
+  function dering(Y, w, h, strength, k) {
+    const lp = gaussBlur(Y, w, h, 0.8 * (k || 1)), a = strength / 100, out = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const y0 = y > 0 ? y - 1 : 0, y1 = y < h - 1 ? y + 1 : h - 1;
+      for (let x = 0; x < w; x++) {
+        const x0 = x > 0 ? x - 1 : 0, x1 = x < w - 1 ? x + 1 : w - 1;
+        const gx = (lp[y * w + x1] - lp[y * w + x0]) * 0.5, gy = (lp[y1 * w + x] - lp[y0 * w + x]) * 0.5;
+        const keep = Math.min(1, (Math.abs(gx) + Math.abs(gy)) / 8);   // 0 flat → attenuate, 1 edge → keep
+        const i = y * w + x, att = a * (1 - keep);
+        out[i] = lp[i] + (Y[i] - lp[i]) * (1 - att);
+      }
+    }
+    return out;
+  }
+  Pipeline.dering = dering;
+
+  function cleanupActive(C) { return !!(C && (C.dering || C.deblock || C.deband || C.chroma || C.gamut)); }
+  function cleanup(img, C, k, seed) {
+    if (!cleanupActive(C)) return img;
+    const { w, h } = img, N = w * h;
+    let { Y, Cb, Cr } = toYCbCr(img);
+    if (C.dering > 0) Y = dering(Y, w, h, C.dering, k);
+    if (C.deblock > 0) Y = deblock(Y, w, h, C.deblock, Math.max(2, Math.round((C.blockSize || 8) * k)));
+    if (C.deband > 0) Y = deband(Y, w, h, C.deband, k, seed);
+    if (C.chroma > 0) {
+      const sig = C.chroma / 100 * 3 * k;
+      if (C.chromaEdge) { Cb = bilateral(Cb, w, h, C.chroma * 0.5); Cr = bilateral(Cr, w, h, C.chroma * 0.5); }
+      else if (sig > 0.25) { Cb = gaussBlur(Cb, w, h, sig); Cr = gaussBlur(Cr, w, h, sig); }
+    }
+    if (C.gamut > 0) gamutSafe(Y, Cb, Cr, w, h, C.gamut / 100);
+    return fromYCbCr(Y, Cb, Cr, w, h);
+  }
+  Pipeline.cleanup = cleanup;
+
   /* ------------------------------------------------------ stages */
   function cropImage(img, V) {
     const { w, h } = img;
@@ -1260,6 +1398,7 @@
      stages that smear edges (channel shift, phase shift, interpolation
      forcing) trim themselves, so the result never carries a bad border. */
   const STAGES = {
+    cleanup: { label: 'Cleaning up…', run: (img, P, k) => cleanup(img, P.cleanup || {}, k, P.seed) },
     photo: { label: 'Developing (edit photo)…', run: (img, P, k) => photoEdit(img, P.photo || {}, k, P.seed) },
     ch: { label: 'Shifting colour channels…', run: (img, P, k) => cropImage(channelShift(img, P.ch, k).img, validRect(img.w, img.h, P.ch, k)) },
     tone: { label: 'Adjusting tone per channel…', run: (img, P) => toneAdjust(img, P.tone || {}) },
@@ -1301,7 +1440,7 @@
     },
     bayer: { label: 'Bayer sensor grid…', run: (img, P, k) => sensorGrid(img, P.bayer, k, P.seed) },
   };
-  Pipeline.STAGE_ORDER = ['photo', 'ch', 'tone', 'freq', 'grad', 'jig', 'fourier', 'interp', 'geo', 'rs', 'bayer'];
+  Pipeline.STAGE_ORDER = ['photo', 'ch', 'tone', 'freq', 'grad', 'jig', 'fourier', 'interp', 'geo', 'rs', 'bayer', 'cleanup'];
 
   /* Runs one stage. opts: { status, tick, forExport }. */
   Pipeline.runStage = async function (img, id, P, k, opts) {

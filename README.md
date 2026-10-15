@@ -19,6 +19,8 @@ The tool is step-by-step. Each tab is one stage; its preview shows the **working
 
 **Edit photo** — the usual developing controls, on luminance only so colours never shift: sharpen (amount, radius, edge masking), reduce luminance noise (edge-preserving), reduce colour noise, texture (±, medium-fine detail band), and grain (amount, size, roughness, optional colour).
 
+**Cleanup / repair** — removes artifacts that heavy layering leaves behind, all on luminance/chroma so nothing shifts hue: tame ringing & grid checker (edge-aware fine-band attenuation — flat-area oscillation is smoothed, real edges and texture kept), soften 8-px JPEG blocking (only low-contrast block edges), remove gradient banding (flatness-aware dither), clean colour speckle (optionally edge-preserving), and fix impossible colours (pulls out-of-gamut pixels back by reducing saturation, keeping hue, instead of a hue-shifting hard clip). Best applied as a finishing pass.
+
 **Colour channel shifts** — move each of the red, green and blue layers sideways (X), up/down (Y) and zoom it from the centre (Z), with sub-pixel precision. Edges that end up missing a colour are trimmed off the frame automatically.
 
 **Tone per channel** — shadows, midtones and highlights (lift / gamma / gain) for red, green and blue separately.
