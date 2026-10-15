@@ -148,6 +148,43 @@ select {
 .segmented button:last-child { border-right: 0; }
 .segmented button.on { background: var(--accent-soft); color: #fff; box-shadow: inset 0 -2px 0 var(--accent); }
 
+/* ---------- tabs ---------- */
+.tabs {
+  position: sticky; top: 0; z-index: 5; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
+  margin: 0 calc(-1 * max(16px, env(safe-area-inset-left, 0px))) 10px; padding: 10px max(16px, env(safe-area-inset-left, 0px)) 8px;
+  background: rgba(15, 18, 34, 0.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 999px;
+  border: 1px solid var(--line-2); background: var(--panel); color: var(--text-2); cursor: pointer; font-size: 12.5px; white-space: nowrap;
+}
+.tab:hover { background: var(--panel-2); color: var(--text); }
+.tab.on { background: var(--accent-soft); border-color: var(--accent); color: #fff; }
+.tab .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 8px var(--accent-2); display: none; }
+.tab.pending .tab-dot { display: inline-block; }
+.tab-body { padding: 0 2px 16px; }
+.tab-body > h2 { font-size: 15.5px; margin: 4px 0 6px; }
+.tab-bodies { min-height: 200px; }
+
+/* ---------- apply bar ---------- */
+.apply-bar {
+  position: sticky; bottom: 0; z-index: 5;
+  margin: 12px calc(-1 * max(16px, env(safe-area-inset-left, 0px))) -60px; padding: 10px max(16px, env(safe-area-inset-left, 0px)) calc(12px + env(safe-area-inset-bottom, 0px));
+  background: rgba(15, 18, 34, 0.96); backdrop-filter: blur(8px); border-top: 1px solid var(--line-2);
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.35);
+}
+.apply-bar .row { margin: 3px 0; gap: 6px; }
+.apply-bar .hint { margin: 2px 0 4px; font-size: 11px; }
+.apply-bar .readout { margin: 0; }
+.apply-bar .work-row { justify-content: space-between; }
+.wf { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); cursor: pointer; flex-wrap: wrap; }
+.wf input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
+.wf select { padding: 3px 6px; font-size: 12.5px; }
+input[type=number].narrow { width: 64px; padding: 3px 6px; }
+.steps { margin: 4px 0 0; padding-left: 20px; font-family: var(--mono); font-size: 11.5px; color: var(--text-2); line-height: 1.5; }
+.steps li { margin: 2px 0; word-break: break-word; }
+
 /* ---------- panel sections ---------- */
 .section {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);

@@ -1,6 +1,9 @@
 /* editor-v — app.js
-   UI, live preview and export. Everything runs in this page; there is no
-   network code anywhere in this file (and the page's CSP forbids it). */
+   Step-by-step UI: one tab per stage. Each tab previews the working image plus
+   that tab's settings only; "Apply step" bakes the stage into the working
+   image at full resolution (optionally re-sampling afterwards), so every later
+   stage starts from real, re-interpolated pixels. Everything runs in this page;
+   there is no network code anywhere in this file. */
 (function () {
   'use strict';
 
@@ -22,6 +25,7 @@
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const raf = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   const fmtBytes = (n) => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(2) + ' MB';
+  const deep = (o) => JSON.parse(JSON.stringify(o));
   const usedNames = new Set();
   function exportName() {
     let n; do { n = String(1000 + Math.floor(Math.random() * 9000)); } while (usedNames.has(n) && usedNames.size < 9000);
@@ -37,17 +41,22 @@
   const DEF = Pipeline.defaults();
   const P = Pipeline.defaults();
   const S = {
-    name: 'image', full: null, fullW: 0, fullH: 0, note: '',
-    previewFull: null, previewQuick: null,       // { img, k }
-    srcPreviewRGBA: null,                        // ImageData of the untouched preview, for compare
+    name: 'image', note: '',
+    original: null,                 // the image as loaded (full resolution)
+    work: null, workVersion: 0,     // the working image: original + applied steps
+    steps: [],                      // labels of applied steps
+    undo: [],                       // previous working images, newest last (capped)
+    tab: 'ch',
+    previewFull: null, previewQuick: null, srcPreviewRGBA: null,
     lastResult: null, lastResultRGBA: null, lastK: 1,
     zoom: 'fit', previewMax: 1000, comparing: false,
-    fullCache: null,                             // { key, img } for export
+    fullCache: null,
     rendering: false, pending: null, timer: null, fullTimer: null,
+    wf: { resample: true, pct: 97, kernel: 'lanczos3' },   // "then resample" after each applied step
   };
+  const UNDO_MAX = 3;
 
   /* ---------------------------------------------------- browser scaler */
-  // Plugs the browser's own (canvas) resampler into the pipeline as the "Browser" method.
   Pipeline.browserResample = function (img, dw, dh) {
     const c1 = document.createElement('canvas'); c1.width = img.w; c1.height = img.h;
     c1.getContext('2d').putImageData(new ImageData(Pipeline.toRGBA(img), img.w, img.h), 0, 0);
@@ -113,32 +122,32 @@
 
   const SECTIONS = [
     {
-      id: 'ch', title: 'Colour channel shifts', open: true,
-      blurb: 'Moves and zooms the red, green and blue layers separately, like the colour fringing of a cheap lens. Any edge that ends up missing a colour is trimmed off the frame automatically, so no smeared borders.',
-      controls: [...channelControls(), button('Reset channel shifts', () => resetSection('ch'), { small: true })],
+      id: 'ch', tab: 'Channels', title: 'Colour channel shifts',
+      blurb: 'Moves and zooms the red, green and blue layers separately, like the colour fringing of a cheap lens. Any edge that ends up missing a colour is trimmed off automatically, so no smeared borders.',
+      controls: [...channelControls()],
     },
     {
-      id: 'tone', title: 'Tone per channel',
+      id: 'tone', tab: 'Tone', title: 'Tone per channel',
       blurb: 'Brightness curves for red, green and blue separately: shadows, midtones and highlights each get their own control. Small opposite moves on two channels give a faint colour cast that changes every pixel value without looking edited.',
-      controls: [...toneControls(), button('Reset tone', () => resetSection('tone'), { small: true })],
+      controls: [...toneControls()],
     },
     {
-      id: 'freq', title: 'Frequency bands (detail layers)',
+      id: 'freq', tab: 'Bands', title: 'Frequency bands (detail layers)',
       blurb: 'Splits the picture into three layers by the size of detail: Fine (grain, hair, edges), Medium (textures, small shapes) and Coarse (big shapes, lighting). Each layer can be boosted or cut, blurred, smoothed, or given its own noise.',
       controls: [
         slider('freq.fine', 'Fine ↔ medium boundary', 0.5, 8, 0.1, 'px', 'fine layer keeps only the tiniest detail', 'fine layer takes in bigger detail too'),
         slider('freq.coarse', 'Medium ↔ coarse boundary', 4, 80, 0.5, 'px', 'coarse layer holds only the very largest shapes', 'coarse layer swallows more mid-size shapes'),
         seg('freq.view', 'Show in the preview', [['full', 'Everything'], ['low', 'Coarse'], ['mid', 'Medium'], ['high', 'Fine']],
-          'Look at one layer on its own to understand what you are editing. The downloaded file always contains everything.'),
+          'Look at one layer on its own to understand what you are editing. Applying and saving always use everything.'),
         check('freq.colorNoise', 'Colour noise', 'On: each colour channel gets its own noise pattern (coloured speckle). Off: the same pattern on all three (neutral grain).'),
         ...bandControls('low', 'Coarse layer — big shapes & lighting', 'big shapes flatten toward an even tone', 'big shapes get more contrast', 'soft blotches'),
         ...bandControls('mid', 'Medium layer — textures & small shapes', 'textures fade away', 'textures stand out harder', 'speckle'),
         ...bandControls('high', 'Fine layer — grain, hair & edges', 'fine detail softens away', 'fine detail sharpens, grain shows', 'fine grain'),
-        button('Reset frequency bands', () => resetSection('freq'), { small: true }),
+        button('New random pattern', reseed, { small: true }),
       ],
     },
     {
-      id: 'grad', title: 'Gradient perturbation',
+      id: 'grad', tab: 'Gradient', title: 'Gradient perturbation',
       blurb: 'Adds slow, smooth changes of brightness and colour across the picture — like faint uneven lighting — plus a random variation in how strong edges are. Subtle amounts are invisible to the eye but change every pixel.',
       controls: [
         group('Random drift'),
@@ -151,11 +160,11 @@
         group('Edge jitter'),
         slider('grad.jitter', 'Amount', 0, 100, 1, '%', 'edges untouched', 'edges randomly sharpened and softened in patches'),
         slider('grad.jitterCell', 'Patch size', 10, 600, 5, 'px', 'tiny patches, almost grainy', 'broad regions'),
-        { type: 'row', controls: [button('New random pattern', reseed, { small: true }), button('Reset gradient perturbation', () => resetSection('grad'), { small: true })] },
+        button('New random pattern', reseed, { small: true }),
       ],
     },
     {
-      id: 'jig', title: 'Invisible jigsaw (block swapping)',
+      id: 'jig', tab: 'Jigsaw', title: 'Invisible jigsaw (block swapping)',
       blurb: 'Finds flat blocks (sky, walls, skin, bokeh) and swaps each with a similar flat block nearby. By default only the grain moves: every block keeps its own average colour, so the swap is invisible even across gentle gradients, yet the pixel layout is different.',
       controls: [
         check('jig.on', 'Swap flat blocks', 'Turns the jigsaw on. Nothing happens to blocks that have visible texture or edges in them.'),
@@ -166,23 +175,22 @@
         slider('jig.amount', 'How many to swap', 0, 100, 1, '%', 'swap almost none of the matching blocks', 'swap every matching block'),
         check('jig.keepTone', 'Keep each block\'s average tone (swap only the grain)', 'On: the moved block is shifted to the average colour of its new spot, so nothing is visible. Off: the raw pixels move; needs a low "similar" setting to stay invisible.'),
         check('jig.flip', 'Also flip the swapped blocks randomly', 'Mirrors some moved blocks left-right or top-bottom. Harmless on flat areas, visible on anything with structure.'),
-        seg('jig.view', 'Show in the preview', [['normal', 'Result'], ['highlight', 'Outline swapped blocks']], 'Outlines are preview-only; the saved file never has them. The preview is a smaller image, so the exact set of swapped blocks differs at full size.'),
+        seg('jig.view', 'Show in the preview', [['normal', 'Result'], ['highlight', 'Outline swapped blocks']], 'Outlines are preview-only; applying and saving never include them. The preview is a smaller image, so the exact set of swapped blocks differs at full size.'),
         readout('jig-readout'),
-        { type: 'row', controls: [button('New random pattern', reseed, { small: true }), button('Reset jigsaw', () => resetSection('jig'), { small: true })] },
+        button('New random pattern', reseed, { small: true }),
       ],
     },
     {
-      id: 'fourier', title: 'Phase shift (Fourier translation)',
+      id: 'fourier', tab: 'Phase', title: 'Phase shift (Fourier translation)',
       blurb: 'Moves the whole picture by a fraction of a pixel in the frequency domain: every pixel is rebuilt from a phase-shifted spectrum (sinc interpolation), which is the mathematically exact band-limited shift. Visually identical, but every pixel value changes in a way no ordinary resize produces. The thin edge that would wrap around is trimmed off.',
       controls: [
         slider('fourier.x', 'Sideways', -3, 3, 0.01, 'px', 'picture moves left', 'picture moves right', { note: 'Whole numbers move pixels exactly; fractions such as 0.5 are what make this do something.' }),
         slider('fourier.y', 'Up / down', -3, 3, 0.01, 'px', 'picture moves up', 'picture moves down'),
-        button('Reset phase shift', () => resetSection('fourier'), { small: true }),
       ],
     },
     {
-      id: 'interp', title: 'Interpolation forcing',
-      blurb: 'Re-reads every pixel from a slightly different position: a global fraction-of-a-pixel shift plus a tiny smooth random warp, so each output pixel is a fresh blend of its neighbours at its own phase. Stronger and less regular than a plain resize, with the kernel of your choice.',
+      id: 'interp', tab: 'Interp', title: 'Interpolation forcing',
+      blurb: 'Re-reads every pixel from a slightly different position: a global fraction-of-a-pixel shift, a tiny smooth random warp and an optional per-pixel jitter, so each output pixel is a fresh blend of its neighbours at its own phase.',
       controls: [
         slider('interp.x', 'Sideways shift', -1, 1, 0.01, 'px', 'picture moves left', 'picture moves right', { note: '0.5 px forces the strongest blending; 0 or ±1 blends nothing.' }),
         slider('interp.y', 'Up / down shift', -1, 1, 0.01, 'px', 'picture moves up', 'picture moves down'),
@@ -190,11 +198,11 @@
         slider('interp.warpCell', 'Warp patch size', 10, 600, 5, 'px', 'wobbly, small patches', 'broad, gentle bends'),
         slider('interp.jitter', 'Per-pixel jitter', 0, 0.5, 0.01, 'px', 'every pixel sampled from the same offset', 'each pixel sampled from its own random offset (breaks any regular grid)'),
         select('interp.kernel', 'Interpolation method', [['bilinear', 'Bilinear — soft, 4 neighbours'], ['bicubic', 'Bicubic (Catmull-Rom) — sharp, 16 neighbours'], ['lanczos3', 'Lanczos-3 — sharpest, 36 neighbours, slow']], 'Which neighbours each new pixel is blended from.'),
-        { type: 'row', controls: [button('New random pattern', reseed, { small: true }), button('Reset interpolation forcing', () => resetSection('interp'), { small: true })] },
+        button('New random pattern', reseed, { small: true }),
       ],
     },
     {
-      id: 'geo', title: 'Frame — micro crop, tilt & rotate',
+      id: 'geo', tab: 'Frame', title: 'Frame — micro crop, tilt & rotate',
       blurb: 'Fine adjustments to the framing. The frame always shrinks to the area that has real picture in it, so you never get empty, black or white corners.',
       controls: [
         slider('geo.rotate', 'Rotate', -15, 15, 0.05, '°', 'turns the picture anticlockwise', 'turns the picture clockwise'),
@@ -203,24 +211,22 @@
         slider('geo.crop', 'Trim edges', 0, 25, 0.1, '%', 'keep the whole valid area', 'cut more off every side'),
         slider('geo.posX', 'Window position — sideways', -100, 100, 1, '', 'window slides left (keeps more of the left side)', 'window slides right (keeps more of the right side)', { note: 'Only does something once some edge has been trimmed.' }),
         slider('geo.posY', 'Window position — up / down', -100, 100, 1, '', 'window slides up (keeps more of the top)', 'window slides down (keeps more of the bottom)'),
-        check('geo.restoreSize', 'Stretch the result back to the original pixel size', 'On: the trimmed frame is scaled up so the saved image has the same width and height as the original (uses the resampling method below). Off: the saved image is simply smaller.'),
+        check('geo.restoreSize', 'Stretch the result back to the current pixel size', 'On: the trimmed frame is scaled up so the image keeps its width and height (uses the resampling method from the Resample tab). Off: the image simply gets smaller.'),
         readout('frame-readout'),
-        button('Reset frame', () => resetSection('geo'), { small: true }),
       ],
     },
     {
-      id: 'rs', title: 'Resampling',
-      blurb: 'Re-computes every pixel by scaling the picture to a temporary size and straight back. The dimensions stay the same, but each pixel value is re-interpolated.',
+      id: 'rs', tab: 'Resample', title: 'Resampling',
+      blurb: 'Re-computes every pixel by scaling the picture to a temporary size and straight back. The dimensions stay the same, but each pixel value is re-interpolated. (The "then resample" option below every Apply does the same thing automatically after each step.)',
       controls: [
-        select('rs.kernel', 'Method (quality / kernel)', KERNEL_OPTIONS, 'Sharper methods keep more detail; softer ones smear fine detail. Also used for the final size and the "stretch back" option above.'),
-        slider('rs.roundTrip', 'Whole image — temporary size', 25, 200, 1, '%', 'shrinks then enlarges back: loses fine detail, softer', 'enlarges then shrinks back: keeps detail, subtler change', { note: '100% = off. Every other value re-interpolates the whole picture.' }),
-        slider('rs.outScale', 'Final output size', 10, 200, 1, '%', 'saved image gets smaller', 'saved image gets bigger'),
-        button('Reset resampling', () => resetSection('rs'), { small: true }),
+        select('rs.kernel', 'Method (quality / kernel)', KERNEL_OPTIONS, 'Sharper methods keep more detail; softer ones smear fine detail. Also used by the Frame tab\'s "stretch back" option.'),
+        slider('rs.roundTrip', 'Temporary size', 25, 200, 1, '%', 'shrinks then enlarges back: loses fine detail, softer', 'enlarges then shrinks back: keeps detail, subtler change', { note: '100% = off. Every other value re-interpolates the whole picture.' }),
+        slider('rs.outScale', 'Final size', 10, 200, 1, '%', 'image gets smaller', 'image gets bigger'),
       ],
     },
     {
-      id: 'bayer', title: 'Sensor grid (Bayer)',
-      blurb: 'Re-samples the picture the way a camera sensor sees it: each pixel keeps only one colour in a 2×2 red-green-green-blue mosaic, then the missing colours are rebuilt from the neighbours (demosaicing). The picture looks the same, but a sensor-like grid structure is stamped into every pixel. Works on the final pixel grid, after all other stages.',
+      id: 'bayer', tab: 'Sensor', title: 'Sensor grid (Bayer)',
+      blurb: 'Re-samples the picture the way a camera sensor sees it: each pixel keeps only one colour in a 2×2 red-green-green-blue mosaic, then the missing colours are rebuilt from the neighbours (demosaicing). The picture looks the same, but a sensor-like grid structure is stamped into every pixel.',
       controls: [
         check('bayer.on', 'Re-sample through a Bayer mosaic', 'Turns the sensor simulation on.'),
         seg('bayer.pattern', 'Mosaic layout', [['rggb', 'RGGB'], ['bggr', 'BGGR'], ['grbg', 'GRBG'], ['gbrg', 'GBRG']], 'Which colour sits top-left in each 2×2 cell. Same effect, different grid phase.'),
@@ -230,32 +236,26 @@
         slider('bayer.dither', 'Dither strength', 0, 8, 0.25, 'levels', 'no pattern', 'stronger fixed checker-like pattern locked to the pixel grid'),
         seg('bayer.ditherSize', 'Pattern size', [[2, '2 × 2'], [4, '4 × 4'], [8, '8 × 8']], 'How many pixels the threshold pattern repeats over.'),
         check('bayer.ditherColor', 'Different pattern phase per colour channel', 'On: the pattern is offset for green and blue, giving a faint colour texture instead of a grey one.'),
-        note('The preview is a reduced image, so the grid there is only indicative; the saved file gets the exact 2 × 2 pattern on its real pixels.'),
-        button('Reset sensor grid', () => resetSection('bayer'), { small: true }),
+        note('The preview is a reduced image, so the grid there is only indicative; applying and saving put the exact 2 × 2 pattern on the real pixels.'),
       ],
     },
     {
-      id: 'seed', title: 'Random pattern',
-      blurb: 'All noise, drift, warp and block-swap choices come from this one number. Same number = same result, so your edits are repeatable.',
-      controls: [{ type: 'seed' }],
-    },
-    {
-      id: 'out', title: 'Save', open: true,
-      blurb: 'Saves a JPEG at full resolution with all the settings above applied. Saving goes through the browser\'s own encoder, which also drops any camera metadata (EXIF, GPS…).',
+      id: 'out', tab: 'Save', title: 'Save & steps',
+      blurb: 'Saves the working image as a JPEG at full resolution. Saving goes through the browser\'s own encoder, which also drops any camera metadata (EXIF, GPS…). The Download button on the top bar does the same from any tab.',
       controls: [
         slider('out.quality', 'JPEG quality', 1, 100, 1, '', 'smaller file, more compression artefacts', 'bigger file, cleaner'),
         { type: 'export' },
       ],
     },
   ];
+  const SECTION_BY_ID = Object.fromEntries(SECTIONS.map((s) => [s.id, s]));
 
   /* ------------------------------------------------------- build panel */
-  const controls = new Map(); // path → { spec, input, val, update }
+  const controls = new Map(); // path → { spec, update }
   const panel = $('#panel');
 
   function digitsFor(step) { const s = String(step); return s.includes('.') ? s.split('.')[1].length : 0; }
   function fmtVal(spec, v) {
-    if (spec.pct) return Math.round(v * 100) + ' %';
     const d = digitsFor(spec.step);
     const sign = spec.min < 0 && v > 0 ? '+' : '';
     return sign + Number(v).toFixed(d) + (spec.unit ? ' ' + spec.unit : '');
@@ -267,10 +267,9 @@
     const a = zeroInRange ? Math.min(0, v) : lo, b = zeroInRange ? Math.max(0, v) : v;
     input.style.setProperty('--fill', `linear-gradient(90deg, var(--line-2) 0 ${pct(a)}, var(--accent) ${pct(a)} ${pct(b)}, var(--line-2) ${pct(b)} 100%)`);
   }
-
   function buildSlider(spec) {
     const def = getPath(DEF, spec.path);
-    const input = el('input', { type: 'range', min: spec.min, max: spec.max, step: spec.step, value: getPath(P, spec.path) });
+    const input = el('input', { type: 'range', id: 'ctl-' + spec.path.replace(/\./g, '-'), min: spec.min, max: spec.max, step: spec.step, value: getPath(P, spec.path) });
     const val = el('button', { class: 'val', type: 'button', title: 'Click to reset to ' + fmtVal(spec, def) });
     const update = () => {
       const v = getPath(P, spec.path);
@@ -282,30 +281,29 @@
     input.addEventListener('change', () => { setPath(P, spec.path, +input.value); update(); onParamChange(spec.path, 'full'); });
     input.addEventListener('dblclick', () => { setPath(P, spec.path, def); update(); onParamChange(spec.path, 'full'); });
     val.addEventListener('click', () => { setPath(P, spec.path, def); update(); onParamChange(spec.path, 'full'); });
-    const wrap = el('div', { class: 'ctl' },
-      el('div', { class: 'ctl-top' }, el('label', { text: spec.label }), val),
+    controls.set(spec.path, { spec, update });
+    update();
+    return el('div', { class: 'ctl' },
+      el('div', { class: 'ctl-top' }, el('label', { for: input.id, text: spec.label }), val),
       input,
       el('div', { class: 'hint' }, el('span', { class: 'l', text: spec.hintL }), el('span', { class: 'r', text: spec.hintR })),
       spec.note ? el('div', { class: 'note', text: spec.note }) : null);
-    controls.set(spec.path, { spec, input, update });
-    update();
-    return wrap;
   }
   function buildCheck(spec) {
-    const input = el('input', { type: 'checkbox' });
+    const input = el('input', { type: 'checkbox', id: 'ctl-' + spec.path.replace(/\./g, '-') });
     const update = () => { input.checked = !!getPath(P, spec.path); };
     input.addEventListener('change', () => { setPath(P, spec.path, input.checked); onParamChange(spec.path, 'full'); });
-    controls.set(spec.path, { spec, input, update });
+    controls.set(spec.path, { spec, update });
     update();
     return el('label', { class: 'check' }, input, el('div', {}, el('div', { class: 'lbl', text: spec.label }), spec.hint ? el('div', { class: 'hint single' }, el('span', { class: 'l', text: spec.hint })) : null));
   }
   function buildSelect(spec) {
-    const sel = el('select', {}, ...spec.options.map(([v, t]) => el('option', { value: v, text: t })));
+    const sel = el('select', { id: 'ctl-' + spec.path.replace(/\./g, '-') }, ...spec.options.map(([v, t]) => el('option', { value: v, text: t })));
     const update = () => { sel.value = getPath(P, spec.path); };
     sel.addEventListener('change', () => { setPath(P, spec.path, sel.value); onParamChange(spec.path, 'full'); });
-    controls.set(spec.path, { spec, input: sel, update });
+    controls.set(spec.path, { spec, update });
     update();
-    return el('div', { class: 'sel' }, el('label', { text: spec.label }), sel, spec.hint ? el('div', { class: 'hint single' }, el('span', { class: 'l', text: spec.hint })) : null);
+    return el('div', { class: 'sel' }, el('label', { for: sel.id, text: spec.label }), sel, spec.hint ? el('div', { class: 'hint single' }, el('span', { class: 'l', text: spec.hint })) : null);
   }
   function buildSeg(spec) {
     const btns = spec.options.map(([v, t]) => el('button', { type: 'button', text: t, 'data-v': String(v) }));
@@ -316,23 +314,32 @@
     return el('div', { class: 'seg-ctl' }, el('div', { class: 'lbl', text: spec.label }), el('div', { class: 'segmented' }, ...btns), spec.hint ? el('div', { class: 'hint single' }, el('span', { class: 'l', text: spec.hint })) : null);
   }
   function buildSeed() {
-    const num = el('input', { type: 'number', min: 0, max: 999999999, step: 1, value: P.seed });
+    const num = el('input', { type: 'number', id: 'ctl-seed', min: 0, max: 999999999, step: 1, value: P.seed });
     const update = () => { num.value = P.seed; };
     num.addEventListener('change', () => { P.seed = Math.max(0, Math.floor(+num.value || 0)); update(); onParamChange('seed', 'full'); });
-    controls.set('seed', { spec: { path: 'seed' }, input: num, update });
+    controls.set('seed', { spec: { path: 'seed' }, update });
     const reroll = el('button', { class: 'btn small', type: 'button', text: 'New random pattern', onclick: reseed });
-    return el('div', { class: 'row' }, el('label', { class: 'lbl', text: 'Pattern number' }), num, reroll);
+    return el('div', {},
+      el('div', { class: 'row' }, el('label', { class: 'lbl', for: 'ctl-seed', text: 'Random pattern number' }), num, reroll),
+      el('div', { class: 'hint single' }, el('span', { class: 'l', text: 'All noise, drift, warp and block-swap choices come from this number. Same number = same result, so a step is repeatable.' })));
   }
   function buildExport() {
     const dl = el('button', { class: 'btn primary', type: 'button', text: 'Download JPEG', onclick: downloadJpeg });
     const est = el('button', { class: 'btn', type: 'button', text: 'Estimate file size', onclick: estimateSize });
     const size = el('span', { class: 'readout', id: 'size-readout' });
-    const reset = el('button', { class: 'btn small ghost', type: 'button', text: 'Reset everything', onclick: resetAll });
+    const rt = el('button', { class: 'btn', type: 'button', text: 'Encode to JPEG and keep editing', onclick: jpegRoundTrip });
+    const reset = el('button', { class: 'btn small ghost', type: 'button', text: 'Reset all pending settings', onclick: resetAll });
     const save = el('button', { class: 'btn small ghost', type: 'button', text: 'Save settings (.json)', onclick: saveSettings });
     const load = el('button', { class: 'btn small ghost', type: 'button', text: 'Load settings…', onclick: () => $('#settings-input').click() });
     return el('div', {},
       el('div', { class: 'row' }, dl, est, size),
       el('div', { class: 'readout', id: 'export-readout' }),
+      el('div', { class: 'group' },
+        el('div', { class: 'group-title', text: 'JPEG round trip' }),
+        el('div', { class: 'row' }, rt),
+        el('div', { class: 'hint single' }, el('span', { class: 'l', text: 'Encodes the working image as a JPEG at the quality above and decodes it straight back, so the compression itself becomes part of the image before the next step. Same as downloading and re-opening the file, without leaving the page.' }))),
+      el('div', { class: 'group' }, el('div', { class: 'group-title', text: 'Applied steps' }), el('ol', { class: 'steps', id: 'steps-list' })),
+      el('div', { class: 'group' }, el('div', { class: 'group-title', text: 'Random pattern' }), buildSeed()),
       el('div', { class: 'group' }, el('div', { class: 'group-title', text: 'Settings' }), el('div', { class: 'row' }, reset, save, load)),
     );
   }
@@ -343,36 +350,79 @@
       case 'select': return buildSelect(spec);
       case 'seg': return buildSeg(spec);
       case 'button': return el('div', { class: 'row' }, el('button', { class: 'btn' + (spec.small ? ' small ghost' : ''), type: 'button', text: spec.label, onclick: spec.onClick }));
-      case 'row': return el('div', { class: 'row' }, ...spec.controls.map((c) => el('button', { class: 'btn' + (c.small ? ' small ghost' : ''), type: 'button', text: c.label, onclick: c.onClick })));
       case 'note': return el('div', { class: 'note', text: spec.text });
       case 'group': return el('div', { class: 'group' }, el('div', { class: 'group-title' }, spec.swatch ? el('span', { class: 'swatch ' + spec.swatch }) : null, document.createTextNode(spec.title)));
       case 'readout': return el('div', { class: 'readout', id: spec.id });
-      case 'seed': return buildSeed();
       case 'export': return buildExport();
     }
   }
-  const sectionEls = new Map();
-  for (const sec of SECTIONS) {
-    const body = el('div', { class: 'section-body' }, el('p', { class: 'blurb', text: sec.blurb }), ...sec.controls.map(buildControl));
-    const d = el('details', { class: 'section', id: 'sec-' + sec.id, open: !!sec.open },
-      el('summary', {}, el('h2', { text: sec.title }), el('span', { class: 'badge', text: 'edited' })), body);
-    panel.append(d);
-    sectionEls.set(sec.id, d);
-  }
 
-  function syncAll() { for (const c of controls.values()) c.update(); markTouched(); updateInfo(); }
-  function markTouched() {
-    for (const [id, d] of sectionEls) {
-      const a = JSON.stringify(P[id]), b = JSON.stringify(DEF[id]);
-      d.classList.toggle('touched', (id === 'out' || id === 'seed') ? false : a !== b);
-    }
+  // tab strip + one body per section
+  const tabButtons = new Map(), tabBodies = new Map();
+  const tabStrip = el('nav', { class: 'tabs', 'aria-label': 'Steps' });
+  for (const sec of SECTIONS) {
+    const b = el('button', { type: 'button', class: 'tab', 'data-tab': sec.id, onclick: () => showTab(sec.id) },
+      el('span', { class: 'tab-name', text: sec.tab }), el('span', { class: 'tab-dot', title: 'has unapplied changes' }));
+    tabStrip.append(b); tabButtons.set(sec.id, b);
+    const body = el('section', { class: 'tab-body', id: 'sec-' + sec.id, hidden: true },
+      el('h2', { text: sec.title }), el('p', { class: 'blurb', text: sec.blurb }), ...sec.controls.map(buildControl));
+    tabBodies.set(sec.id, body);
   }
-  function resetSection(id) { P[id] = JSON.parse(JSON.stringify(DEF[id])); syncAll(); onParamChange(id, 'full'); }
-  function resetAll() { for (const k of Object.keys(DEF)) P[k] = JSON.parse(JSON.stringify(DEF[k])); syncAll(); onParamChange('*', 'full'); }
+  const bodyWrap = el('div', { class: 'tab-bodies' }, ...tabBodies.values());
+
+  // apply bar
+  const applyBtn = el('button', { class: 'btn primary', type: 'button', id: 'btn-apply', text: 'Apply step', onclick: applyStep });
+  const resetBtn = el('button', { class: 'btn small ghost', type: 'button', text: 'Reset tab', onclick: () => resetSection(S.tab) });
+  const wfCheck = el('input', { type: 'checkbox', id: 'wf-resample' }); wfCheck.checked = S.wf.resample;
+  const wfPct = el('input', { type: 'number', id: 'wf-pct', min: 25, max: 200, step: 1, value: S.wf.pct, class: 'narrow' });
+  const wfKernel = el('select', { id: 'wf-kernel' }, ...KERNEL_OPTIONS.filter(([v]) => v !== 'browser').map(([v, t]) => el('option', { value: v, text: t.split(' — ')[0] })));
+  wfKernel.value = S.wf.kernel;
+  wfCheck.addEventListener('change', () => { S.wf.resample = wfCheck.checked; });
+  wfPct.addEventListener('change', () => { S.wf.pct = clamp(Math.round(+wfPct.value || 97), 25, 200); wfPct.value = S.wf.pct; });
+  wfKernel.addEventListener('change', () => { S.wf.kernel = wfKernel.value; });
+  const undoBtn = el('button', { class: 'btn small ghost', type: 'button', id: 'btn-undo', text: 'Undo last step', onclick: undoStep });
+  const revertBtn = el('button', { class: 'btn small ghost', type: 'button', id: 'btn-revert', text: 'Revert to original', onclick: revertAll });
+  const applyRows = el('div', { id: 'apply-rows' },
+    el('div', { class: 'row' }, applyBtn, resetBtn,
+      el('label', { class: 'wf' }, wfCheck, document.createTextNode(' then resample via '), wfPct, document.createTextNode(' % '), wfKernel)),
+    el('div', { class: 'hint single' }, el('span', { class: 'l', text: 'Apply bakes this tab into the pixels at full size and clears its sliders; "then resample" re-interpolates every pixel afterwards.' })));
+  const applyBar = el('div', { class: 'apply-bar', id: 'apply-bar' },
+    applyRows,
+    el('div', { class: 'row work-row' }, el('span', { class: 'readout', id: 'work-readout' }), undoBtn, revertBtn));
+  panel.append(tabStrip, bodyWrap, applyBar);
+
+  function showTab(id) {
+    S.tab = id;
+    for (const [k, b] of tabButtons) b.classList.toggle('on', k === id);
+    for (const [k, body] of tabBodies) body.hidden = k !== id;
+    applyRows.hidden = id === 'out';
+    S.fullCache = null;
+    updateTabDots(); updateInfo();
+    bodyWrap.scrollTop = 0; panel.scrollTop = 0;
+    schedule('full');
+  }
+  function tabPending(id) { return id !== 'out' && JSON.stringify(P[id]) !== JSON.stringify(DEF[id]); }
+  function updateTabDots() { for (const [k, b] of tabButtons) b.classList.toggle('pending', tabPending(k)); }
+  function syncAll() { for (const c of controls.values()) c.update(); updateTabDots(); updateInfo(); }
+  function resetSection(id) { if (id === 'out') return; P[id] = deep(DEF[id]); syncAll(); onParamChange(id, 'full'); }
+  function resetAll() { for (const k of Object.keys(DEF)) if (k !== 'out') P[k] = deep(DEF[k]); syncAll(); onParamChange('*', 'full'); }
+
+  // a short human description of a tab's non-default settings
+  function describe(id) {
+    const parts = [];
+    const walk = (a, b, prefix) => {
+      for (const k of Object.keys(b)) {
+        if (a[k] && typeof a[k] === 'object') walk(a[k], b[k], prefix + k + '.');
+        else if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) parts.push(prefix + k + '=' + (typeof a[k] === 'number' ? +a[k].toFixed(3) : a[k]));
+      }
+    };
+    walk(P[id], DEF[id], '');
+    return parts.filter((s) => !/\.view=|^view=/.test(s)).join(', ');
+  }
 
   /* ----------------------------------------------------- param change */
   function onParamChange(path, mode) {
-    markTouched();
+    updateTabDots();
     if (path.startsWith('out.')) { if (S.fullCache) estimateSize(); return; }
     S.fullCache = null;
     $('#size-readout').textContent = '';
@@ -381,10 +431,8 @@
   }
 
   /* ------------------------------------------------------- scheduling */
-  // 'quick' renders a half-size preview while a slider is being dragged; 'full'
-  // renders the proper preview on release (and a little after any quick render).
   function schedule(mode) {
-    if (!S.full) return;
+    if (!S.work) return;
     S.pending = (mode === 'full' || S.pending === 'full') ? 'full' : 'quick';
     clearTimeout(S.timer); clearTimeout(S.fullTimer);
     S.timer = setTimeout(kick, 25);
@@ -404,7 +452,7 @@
   async function renderPreview(mode) {
     const pv = (mode === 'quick' && S.previewQuick) ? S.previewQuick : S.previewFull;
     const t0 = performance.now();
-    const img = await Pipeline.run(pv.img, P, pv.k, { status: (s) => setStatus(s, true), tick: raf });
+    const img = S.tab === 'out' ? pv.img : await Pipeline.runStage(pv.img, S.tab, P, pv.k, { status: (s) => setStatus(s, true), tick: raf });
     const dt = performance.now() - t0;
     S.lastResult = img; S.lastK = pv.k;
     const jr = $('#jig-readout');
@@ -431,7 +479,6 @@
       if (h > vh) { h = vh; w = h * aspect; }
       cv.style.width = Math.max(1, Math.floor(w)) + 'px'; cv.style.height = Math.max(1, Math.floor(h)) + 'px';
     } else {
-      // "1:1" = one preview pixel per screen pixel (a quick half-size render is shown at the same size)
       const scale = S.previewFull ? S.previewFull.k / (S.lastK || S.previewFull.k) : 1;
       cv.style.width = Math.round(cv.width * scale) + 'px'; cv.style.height = Math.round(cv.height * scale) + 'px';
     }
@@ -450,7 +497,7 @@
     if (!S.srcPreviewRGBA || S.comparing) return;
     S.comparing = true; cmpBtn.classList.add('holding');
     paintCanvas(S.srcPreviewRGBA);
-    setStatus('showing the untouched original');
+    setStatus('showing the working image before this step');
   }
   function stopCompare() {
     if (!S.comparing) return;
@@ -460,10 +507,10 @@
   }
   cmpBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); startCompare(); });
   for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) cmpBtn.addEventListener(ev, stopCompare);
+  const isTyping = (e) => /^(input|select|textarea)$/i.test(e.target.tagName) && e.target.type !== 'range';
   window.addEventListener('keydown', (e) => { if ((e.key === 'c' || e.key === 'C') && !e.repeat && !isTyping(e)) startCompare(); });
   window.addEventListener('keyup', (e) => { if (e.key === 'c' || e.key === 'C') stopCompare(); });
   window.addEventListener('blur', stopCompare);
-  const isTyping = (e) => /^(input|select|textarea)$/i.test(e.target.tagName) && e.target.type !== 'range';
 
   /* ------------------------------------------------------------ loading */
   const MAX_PIXELS = 20e6;
@@ -473,67 +520,69 @@
       try { return await createImageBitmap(blob); }
       catch (e2) {
         const url = URL.createObjectURL(blob);
-        try {
-          const im = new Image(); im.src = url; await im.decode(); return im;
-        } finally { URL.revokeObjectURL(url); }
+        try { const im = new Image(); im.src = url; await im.decode(); return im; }
+        finally { URL.revokeObjectURL(url); }
       }
     }
+  }
+  async function blobToImage(blob) {
+    const bmp = await decode(blob);
+    let w = bmp.naturalWidth || bmp.width, h = bmp.naturalHeight || bmp.height, note = '';
+    if (w * h > MAX_PIXELS) {
+      const s = Math.sqrt(MAX_PIXELS / (w * h));
+      w = Math.round(w * s); h = Math.round(h * s);
+      note = ` (reduced from ${bmp.width}×${bmp.height} to stay within ${MAX_PIXELS / 1e6} megapixels)`;
+    }
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bmp, 0, 0, w, h);
+    if (bmp.close) bmp.close();
+    const d = ctx.getImageData(0, 0, w, h);
+    return { img: Pipeline.fromRGBA(d.data, w, h), note };
   }
   async function loadBlob(blob, name) {
     showOverlay('Decoding image…');
     try {
-      const bmp = await decode(blob);
-      let w = bmp.naturalWidth || bmp.width, h = bmp.naturalHeight || bmp.height;
-      let note = '';
-      if (w * h > MAX_PIXELS) {
-        const s = Math.sqrt(MAX_PIXELS / (w * h));
-        w = Math.round(w * s); h = Math.round(h * s);
-        note = ` (reduced from ${bmp.width}×${bmp.height} to stay within ${MAX_PIXELS / 1e6} megapixels)`;
-      }
-      const c = document.createElement('canvas'); c.width = w; c.height = h;
-      const ctx = c.getContext('2d', { willReadFrequently: true });
-      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
-      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(bmp, 0, 0, w, h);
-      if (bmp.close) bmp.close();
-      const d = ctx.getImageData(0, 0, w, h);
-      S.full = Pipeline.fromRGBA(d.data, w, h);
-      S.fullW = w; S.fullH = h; S.note = note;
+      const { img, note } = await blobToImage(blob);
+      S.original = img; S.note = note;
       S.name = (name || 'image').replace(/\.[a-z0-9]+$/i, '');
-      S.fullCache = null; $('#size-readout').textContent = '';
-      buildPreviews(c);
+      setWork(img, true);
       $('#empty').hidden = true; $('#canvas-wrap').hidden = false;
-      updateInfo();
-      schedule('full');
+      toast(`Loaded ${S.name} · ${img.w}×${img.h}`);
     } catch (e) {
       console.error(e);
       toast('Could not read that file as an image.', 'warn');
     } finally { hideOverlay(); }
   }
-  // Downscaled working copies: "full" preview at the chosen size, "quick" at half of it.
-  function buildPreviews(fullCanvas) {
-    const W = S.fullW, H = S.fullH;
+  // install a new working image (fresh load, applied step, undo…)
+  function setWork(img, fresh) {
+    S.work = img; S.workVersion++;
+    if (fresh) { S.steps = []; S.undo = []; resetAll(); }
+    S.fullCache = null; $('#size-readout').textContent = '';
+    buildPreviews();
+    updateInfo(); updateSteps();
+    schedule('full');
+  }
+  // reduced working copies for the live preview: "full" preview at the chosen size, "quick" at half of it
+  function buildPreviews() {
+    const W = S.work.w, H = S.work.h;
     const maxL = S.previewMax === 'full' ? Infinity : S.previewMax;
     const kFull = Math.min(1, maxL / Math.max(W, H));
     const make = (k) => {
+      if (k === 1) return { img: S.work, k: 1 };
       const w = Math.max(1, Math.round(W * k)), h = Math.max(1, Math.round(H * k));
-      if (k === 1) return { img: S.full, k: 1, canvas: fullCanvas };
-      const c = document.createElement('canvas'); c.width = w; c.height = h;
-      const ctx = c.getContext('2d', { willReadFrequently: true });
-      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(fullCanvas, 0, 0, w, h);
-      const d = ctx.getImageData(0, 0, w, h);
-      return { img: Pipeline.fromRGBA(d.data, w, h), k: w / W };
+      return { img: Pipeline.resampleImage(S.work, w, h, 'browser'), k: w / W };
     };
     S.previewFull = make(kFull);
     const quickK = Math.max(W, H) * kFull > 480 ? kFull * 0.5 : kFull;
     S.previewQuick = quickK === kFull ? null : make(quickK);
     S.srcPreviewRGBA = new ImageData(Pipeline.toRGBA(S.previewFull.img), S.previewFull.img.w, S.previewFull.img.h);
-    S.fullCanvas = fullCanvas;
   }
   $('#preview-size').addEventListener('change', (e) => {
     S.previewMax = e.target.value === 'full' ? 'full' : +e.target.value;
-    if (S.fullCanvas) { buildPreviews(S.fullCanvas); schedule('full'); }
+    if (S.work) { buildPreviews(); schedule('full'); }
   });
 
   $('#btn-open').addEventListener('click', () => $('#file-input').click());
@@ -576,27 +625,80 @@
   /* --------------------------------------------------------------- info */
   function updateInfo() {
     const info = $('#info');
-    if (!S.full) { info.textContent = ''; return; }
-    const o = Pipeline.outputSize(S.fullW, S.fullH, P);
-    const trimmed = o.frame.w !== S.fullW || o.frame.h !== S.fullH;
-    info.textContent = `${S.name} · source ${S.fullW}×${S.fullH}${S.note} · output ${o.w}×${o.h}` +
-      (trimmed ? ` · frame trimmed to ${o.frame.w}×${o.frame.h} (${Math.round(o.frame.w * o.frame.h / (S.fullW * S.fullH) * 100)}% of the area)` : '') +
-      (S.name === 'test-image' ? '\nThis is the built-in test picture. Open or drop your own image to edit it; it stays in this tab.' : '');
+    if (!S.work) { info.textContent = ''; return; }
+    const o = S.tab === 'out' ? { w: S.work.w, h: S.work.h } : Pipeline.stageOutputSize(S.work.w, S.work.h, S.tab, P);
+    const sec = SECTION_BY_ID[S.tab];
+    const pend = tabPending(S.tab);
+    let line = `working image ${S.work.w}×${S.work.h} (original ${S.original.w}×${S.original.h}${S.note}) · ${S.steps.length} step${S.steps.length === 1 ? '' : 's'} applied`;
+    if (S.tab !== 'out') line += ` · ${sec.tab} tab: ${pend ? `pending → ${o.w}×${o.h}` : 'nothing set yet'}`;
+    if (S.name === 'test-image') line += '\nThis is the built-in test picture. Open or drop your own image to edit it; it stays in this tab.';
+    info.textContent = line;
     const fr = $('#frame-readout');
-    if (fr) fr.textContent = `Frame: ${o.frame.w} × ${o.frame.h} px` + (trimmed ? ` (from ${S.fullW} × ${S.fullH})` : ' (nothing trimmed)');
+    if (fr) { const f = Pipeline.stageOutputSize(S.work.w, S.work.h, 'geo', P); fr.textContent = `Frame: ${f.w} × ${f.h} px` + (f.w !== S.work.w || f.h !== S.work.h ? ` (from ${S.work.w} × ${S.work.h})` : ' (nothing trimmed)'); }
+    const wr = $('#work-readout');
+    if (wr) wr.textContent = `Working image ${S.work.w}×${S.work.h} · ${S.steps.length} step${S.steps.length === 1 ? '' : 's'} applied`;
+    $('#btn-undo').disabled = !S.undo.length;
+    $('#btn-revert').disabled = !S.steps.length;
+    applyBtn.disabled = !pend;
+  }
+  function updateSteps() {
+    const ol = $('#steps-list'); if (!ol) return;
+    ol.replaceChildren(...S.steps.map((s) => el('li', { text: s })));
+    if (!S.steps.length) ol.append(el('li', { class: 'muted', text: 'none yet — the working image is the original' }));
+  }
+
+  /* --------------------------------------------------------- apply step */
+  function pushUndo(label) {
+    S.undo.push(S.work);
+    while (S.undo.length > UNDO_MAX) S.undo.shift();
+    S.steps.push(label);
+  }
+  async function applyStep() {
+    if (!S.work || S.tab === 'out' || !tabPending(S.tab)) return;
+    const id = S.tab, sec = SECTION_BY_ID[id];
+    showOverlay(`Applying ${sec.tab}…`);
+    await raf();
+    try {
+      let img = await Pipeline.runStage(S.work, id, P, 1, { forExport: true, status: (s) => { $('#overlay-text').textContent = s; }, tick: raf });
+      let label = `${sec.tab}: ${describe(id)}`;
+      if (S.wf.resample && S.wf.pct !== 100) {
+        $('#overlay-text').textContent = 'Resampling…'; await raf();
+        img = Pipeline.resampleStep(img, S.wf.pct, S.wf.kernel);
+        label += ` → resampled ${S.wf.pct}% ${S.wf.kernel}`;
+      }
+      pushUndo(label);
+      P[id] = deep(DEF[id]);
+      syncAll();
+      setWork(img, false);
+      toast(`Applied ${sec.tab} · working image ${img.w}×${img.h}`);
+    } catch (e) { console.error(e); toast('Applying failed: ' + e.message, 'warn'); }
+    finally { hideOverlay(); }
+  }
+  function undoStep() {
+    if (!S.undo.length) return;
+    const prev = S.undo.pop(); const label = S.steps.pop();
+    setWork(prev, false);
+    toast('Undid: ' + label.split(':')[0]);
+  }
+  function revertAll() {
+    if (!S.original) return;
+    S.undo = []; S.steps = [];
+    setWork(S.original, false);
+    toast('Back to the original image');
   }
 
   /* ------------------------------------------------------------- export */
   function showOverlay(t) { $('#overlay-text').textContent = t; $('#overlay').hidden = false; }
   function hideOverlay() { $('#overlay').hidden = true; }
-  function exportKey() { const q = JSON.parse(JSON.stringify(P)); delete q.out; q.freq.view = 'full'; q.jig.view = 'normal'; return JSON.stringify(q); }
+  function exportKey() { const q = deep(P[S.tab] || {}); if (q.view) q.view = S.tab === 'freq' ? 'full' : 'normal'; return S.tab + ':' + S.workVersion + ':' + JSON.stringify(q) + ':' + P.seed; }
+  // full-resolution version of what the preview shows: the working image plus this tab's pending settings
   async function buildFull() {
     const key = exportKey();
     if (S.fullCache && S.fullCache.key === key) return S.fullCache.img;
     showOverlay('Rendering at full size…');
     await raf();
     try {
-      const img = await Pipeline.run(S.full, P, 1, { status: (s) => { $('#overlay-text').textContent = s; }, tick: raf, forExport: true });
+      const img = (S.tab === 'out' || !tabPending(S.tab)) ? S.work : await Pipeline.runStage(S.work, S.tab, P, 1, { forExport: true, status: (s) => { $('#overlay-text').textContent = s; }, tick: raf });
       S.fullCache = { key, img };
       return img;
     } finally { hideOverlay(); }
@@ -604,18 +706,15 @@
   function toJpegBlob(img, quality) {
     const c = document.createElement('canvas'); c.width = img.w; c.height = img.h;
     c.getContext('2d').putImageData(new ImageData(Pipeline.toRGBA(img), img.w, img.h), 0, 0);
-    return new Promise((res, rej) => c.toBlob((b) => b ? res(b) : rej(new Error('JPEG encoding failed')), 'image/jpeg', P.out.quality / 100));
+    return new Promise((res, rej) => c.toBlob((b) => b ? res(b) : rej(new Error('JPEG encoding failed')), 'image/jpeg', quality / 100));
   }
   async function estimateSize() {
-    if (!S.full) return;
+    if (!S.work) return;
     const img = await buildFull();
     const blob = await toJpegBlob(img, P.out.quality);
     $('#size-readout').textContent = `≈ ${fmtBytes(blob.size)} at quality ${P.out.quality}`;
     $('#export-readout').textContent = `Output ${img.w} × ${img.h} px`;
   }
-  // Hands a generated file to the person. Inside the claude.ai viewer the page
-  // cannot start downloads itself, so it asks the viewer's download capability;
-  // opened from disk or a plain server, a normal download link does the job.
   async function deliverFile(blob, filename) {
     let dl = null;
     try { if (window.claude && typeof window.claude.use === 'function') dl = await window.claude.use('downloads'); } catch (e) { dl = null; }
@@ -623,7 +722,7 @@
       try { await dl.save({ filename, data: blob }); return 'saved'; }
       catch (e) {
         if (e && e.code === 'declined') return 'declined';
-        if (e && (e.code === 'rate_limited')) { toast('A save prompt is already open. Try again in a moment.', 'warn'); return 'failed'; }
+        if (e && e.code === 'rate_limited') { toast('A save prompt is already open. Try again in a moment.', 'warn'); return 'failed'; }
         toast('Saving is not available in this view.', 'warn'); return 'failed';
       }
     }
@@ -634,18 +733,38 @@
     return 'saved';
   }
   async function downloadJpeg() {
-    if (!S.full) { toast('Open an image first.', 'warn'); return; }
+    if (!S.work) { toast('Open an image first.', 'warn'); return; }
     const img = await buildFull();
     const blob = await toJpegBlob(img, P.out.quality);
     $('#size-readout').textContent = `≈ ${fmtBytes(blob.size)} at quality ${P.out.quality}`;
     const name = exportName() + '.jpg';
     const r = await deliverFile(blob, name);
-    $('#export-readout').textContent = r === 'saved' ? `Saved ${name} · ${img.w} × ${img.h} px` : `Output ${img.w} × ${img.h} px (not saved)`;
+    const pend = S.tab !== 'out' && tabPending(S.tab);
+    $('#export-readout').textContent = r === 'saved' ? `Saved ${name} · ${img.w} × ${img.h} px${pend ? ` · includes the unapplied ${SECTION_BY_ID[S.tab].tab} settings` : ''}` : `Output ${img.w} × ${img.h} px (not saved)`;
+    toast(r === 'saved' ? `Saved ${name}` : 'Not saved');
+  }
+  $('#btn-download').addEventListener('click', downloadJpeg);
+  // encode the current state as JPEG and decode it back into the working image
+  async function jpegRoundTrip() {
+    if (!S.work) return;
+    const id = S.tab, pend = id !== 'out' && tabPending(id);
+    const img = await buildFull();
+    showOverlay(`Encoding JPEG at quality ${P.out.quality}…`);
+    await raf();
+    try {
+      const blob = await toJpegBlob(img, P.out.quality);
+      const { img: back } = await blobToImage(blob);
+      pushUndo((pend ? `${SECTION_BY_ID[id].tab}: ${describe(id)} → ` : '') + `JPEG round trip, quality ${P.out.quality} (${fmtBytes(blob.size)})`);
+      if (pend) { P[id] = deep(DEF[id]); syncAll(); }
+      setWork(back, false);
+      toast(`JPEG round trip done · ${fmtBytes(blob.size)}`);
+    } catch (e) { console.error(e); toast('Round trip failed: ' + e.message, 'warn'); }
+    finally { hideOverlay(); }
   }
 
   /* ----------------------------------------------------------- settings */
   function saveSettings() {
-    const blob = new Blob([JSON.stringify(P, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ params: P, workflow: S.wf }, null, 2)], { type: 'application/json' });
     deliverFile(blob, 'settings-' + exportName() + '.json');
   }
   function mergeInto(target, src, def) {
@@ -662,7 +781,9 @@
     if (!f) return;
     try {
       const j = JSON.parse(await f.text());
-      mergeInto(P, j, DEF);
+      const params = j.params || j;
+      mergeInto(P, params, DEF);
+      if (j.workflow) { mergeInto(S.wf, j.workflow, { resample: true, pct: 97, kernel: 'lanczos3' }); wfCheck.checked = S.wf.resample; wfPct.value = S.wf.pct; wfKernel.value = S.wf.kernel; }
       for (const c of controls.values()) if (c.spec.type === 'slider') setPath(P, c.spec.path, clamp(getPath(P, c.spec.path), c.spec.min, c.spec.max));
       if (!Pipeline.KERNELS[P.rs.kernel] && P.rs.kernel !== 'browser') P.rs.kernel = DEF.rs.kernel;
       if (!['full', 'low', 'mid', 'high'].includes(P.freq.view)) P.freq.view = 'full';
@@ -673,11 +794,13 @@
       if (![2, 4, 8].includes(P.bayer.ditherSize)) P.bayer.ditherSize = 4;
       syncAll();
       onParamChange('*', 'full');
+      toast('Settings loaded; each tab shows its pending values.');
     } catch (err) { toast('That file is not a valid settings file.', 'warn'); }
   });
 
   /* --------------------------------------------------------------- init */
   syncAll();
+  showTab('ch');
   setStatus('loading the test picture…');
   loadTestImage();
 })();

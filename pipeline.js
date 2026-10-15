@@ -1107,49 +1107,96 @@
     };
   };
 
-  /* src: image, P: params, k: pixel scale (preview/full), opts: { status(fn), tick(fn→Promise), forExport } */
+  /* ------------------------------------------------------ stages */
+  function cropImage(img, V) {
+    const { w, h } = img;
+    const x0 = Math.max(0, V.x0), y0 = Math.max(0, V.y0), x1 = Math.min(w, V.x1), y1 = Math.min(h, V.y1);
+    if (x0 === 0 && y0 === 0 && x1 === w && y1 === h) return img;
+    const ow = x1 - x0, oh = y1 - y0, out = makeImage(ow, oh);
+    for (const name of CH) { const src = img[name], dst = out[name]; for (let y = 0; y < oh; y++) dst.set(src.subarray((y + y0) * w + x0, (y + y0) * w + x1), y * ow); }
+    return out;
+  }
+  Pipeline.cropImage = cropImage;
+
+  /* Each stage, runnable on its own. `id` names the parameter section. The
+     stages that smear edges (channel shift, phase shift, interpolation
+     forcing) trim themselves, so the result never carries a bad border. */
+  const STAGES = {
+    ch: { label: 'Shifting colour channels…', run: (img, P, k) => cropImage(channelShift(img, P.ch, k).img, validRect(img.w, img.h, P.ch, k)) },
+    tone: { label: 'Adjusting tone per channel…', run: (img, P) => toneAdjust(img, P.tone || {}) },
+    freq: { label: 'Editing frequency bands…', run: (img, P, k, o) => frequencyEdit(img, P.freq, k, P.seed, o.forExport ? 'full' : P.freq.view) },
+    grad: { label: 'Perturbing gradients…', run: (img, P, k) => gradientPerturb(img, P.grad, k, P.seed) },
+    jig: { label: 'Swapping flat blocks…', run: (img, P, k, o) => blockSwap(img, P.jig, k, P.seed, !o.forExport && P.jig && P.jig.view === 'highlight') },
+    fourier: {
+      label: 'Phase-shifting (Fourier)…',
+      run: (img, P, k) => {
+        const F = P.fourier || {}, out = fourierShift(img, F, k);
+        const fd = Math.max(Math.abs(F.x || 0), Math.abs(F.y || 0));
+        return fd ? cropImage(out, insetRect({ x0: 0, y0: 0, x1: img.w, y1: img.h }, fd * k + 2, img.w, img.h)) : out;
+      },
+    },
+    interp: {
+      label: 'Forcing interpolation…',
+      run: (img, P, k) => {
+        const I = P.interp || {}, out = interpForce(img, I, k, P.seed);
+        const id = Math.max(Math.abs(I.x || 0), Math.abs(I.y || 0)) + (I.warp || 0) + (I.jitter || 0);
+        return id ? cropImage(out, insetRect({ x0: 0, y0: 0, x1: img.w, y1: img.h }, id * k + (I.kernel === 'lanczos3' ? 3 : I.kernel === 'bilinear' ? 1 : 2), img.w, img.h)) : out;
+      },
+    },
+    geo: {
+      label: 'Fitting the frame…',
+      run: (img, P, k) => {
+        const preW = img.w, preH = img.h;
+        let out = geometry(img, P.geo, k, null);
+        if (P.geo.restoreSize && (out.w !== preW || out.h !== preH)) out = resampleImage(out, preW, preH, P.rs.kernel);
+        return out;
+      },
+    },
+    rs: {
+      label: 'Resampling…',
+      run: (img, P) => {
+        let out = roundTrip(img, P.rs.roundTrip, P.rs.kernel);
+        if (P.rs.outScale && P.rs.outScale !== 100) out = resampleImage(out, out.w * P.rs.outScale / 100, out.h * P.rs.outScale / 100, P.rs.kernel);
+        return out;
+      },
+    },
+    bayer: { label: 'Sensor grid…', run: (img, P) => sensorGrid(img, P.bayer) },
+  };
+  Pipeline.STAGE_ORDER = ['ch', 'tone', 'freq', 'grad', 'jig', 'fourier', 'interp', 'geo', 'rs', 'bayer'];
+
+  /* Runs one stage. opts: { status, tick, forExport }. */
+  Pipeline.runStage = async function (img, id, P, k, opts) {
+    opts = opts || {};
+    const st = STAGES[id];
+    if (!st) return img;
+    if (opts.status) opts.status(st.label);
+    if (opts.tick) await opts.tick();
+    const out = st.run(img, P, k, opts);
+    if (id === 'jig') out.jigStats = out.swapCount != null ? { swaps: out.swapCount, eligible: out.eligibleCount, blocks: out.blockCount } : null;
+    return out;
+  };
+  /* Size of the image after one stage, for a w×h input at full resolution. */
+  Pipeline.stageOutputSize = function (w, h, id, P) {
+    const full = { x0: 0, y0: 0, x1: w, y1: h };
+    if (id === 'ch') { const V = validRect(w, h, P.ch, 1); return { w: V.x1 - V.x0, h: V.y1 - V.y0 }; }
+    if (id === 'fourier') { const F = P.fourier || {}, fd = Math.max(Math.abs(F.x || 0), Math.abs(F.y || 0)); const V = fd ? insetRect(full, fd + 2, w, h) : full; return { w: V.x1 - V.x0, h: V.y1 - V.y0 }; }
+    if (id === 'interp') { const I = P.interp || {}, d = Math.max(Math.abs(I.x || 0), Math.abs(I.y || 0)) + (I.warp || 0) + (I.jitter || 0); const V = d ? insetRect(full, d + (I.kernel === 'lanczos3' ? 3 : I.kernel === 'bilinear' ? 1 : 2), w, h) : full; return { w: V.x1 - V.x0, h: V.y1 - V.y0 }; }
+    if (id === 'geo') { if (P.geo.restoreSize) return { w, h }; const { rect } = frameFor(w, h, P.geo, null); return { w: Math.max(1, Math.round(rect.w)), h: Math.max(1, Math.round(rect.h)) }; }
+    if (id === 'rs') { const s = (P.rs.outScale || 100) / 100; return { w: Math.max(1, Math.round(w * s)), h: Math.max(1, Math.round(h * s)) }; }
+    return { w, h };
+  };
+  /* Round-trip resample used between steps. */
+  Pipeline.resampleStep = function (img, pct, kname) { return roundTrip(img, pct, kname); };
+
+  /* src: image, P: params, k: pixel scale (preview/full), opts: { status(fn), tick(fn→Promise), forExport }.
+     Runs every stage in order (the one-pass pipeline). */
   Pipeline.run = async function (src, P, k, opts) {
     opts = opts || {};
-    const status = opts.status || (() => {});
-    const tick = opts.tick || (() => Promise.resolve());
-    const stage = async (label) => { status(label); await tick(); };
-
-    await stage('Shifting colour channels…');
-    const cs = channelShift(src, P.ch, k);
-    let img = cs.img;
-    const valid = validRectAll(src.w, src.h, P, k);
-
-    await stage('Adjusting tone per channel…');
-    img = toneAdjust(img, P.tone || {});
-
-    await stage('Editing frequency bands…');
-    img = frequencyEdit(img, P.freq, k, P.seed, opts.forExport ? 'full' : P.freq.view);
-
-    await stage('Perturbing gradients…');
-    img = gradientPerturb(img, P.grad, k, P.seed);
-
-    await stage('Swapping flat blocks…');
-    img = blockSwap(img, P.jig, k, P.seed, !opts.forExport && P.jig && P.jig.view === 'highlight');
-    const jigStats = img.swapCount != null ? { swaps: img.swapCount, eligible: img.eligibleCount, blocks: img.blockCount } : null;
-
-    await stage('Phase-shifting (Fourier)…');
-    img = fourierShift(img, P.fourier || {}, k);
-
-    await stage('Forcing interpolation…');
-    img = interpForce(img, P.interp || {}, k, P.seed);
-
-    await stage('Fitting the frame…');
-    const preW = img.w, preH = img.h;
-    img = geometry(img, P.geo, k, valid);
-    if (P.geo.restoreSize && (img.w !== preW || img.h !== preH)) img = resampleImage(img, preW, preH, P.rs.kernel);
-
-    await stage('Resampling…');
-    img = roundTrip(img, P.rs.roundTrip, P.rs.kernel);
-    if (P.rs.outScale && P.rs.outScale !== 100) img = resampleImage(img, img.w * P.rs.outScale / 100, img.h * P.rs.outScale / 100, P.rs.kernel);
-
-    await stage('Sensor grid…');
-    img = sensorGrid(img, P.bayer);
-
+    let img = src, jigStats = null;
+    for (const id of Pipeline.STAGE_ORDER) {
+      img = await Pipeline.runStage(img, id, P, k, opts);
+      if (id === 'jig') jigStats = img.jigStats || null;
+    }
     img.jigStats = jigStats;
     return img;
   };

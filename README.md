@@ -11,7 +11,11 @@ No build, no server, no dependencies.
 
 Works in current Chrome, Edge, Firefox and Safari. Formats: anything your browser can decode (JPEG, PNG, WebP, GIF, BMP, AVIF…). HEIC is not decodable by most browsers.
 
-## What it does
+## How it works
+
+The tool is step-by-step. Each tab is one stage; its preview shows the **working image plus that tab's settings only**. **Apply step** bakes the stage into the working image at full resolution — optionally followed by a **"then resample"** round trip (temporary size and kernel of your choice), so every later stage starts from freshly re-interpolated pixels rather than from a float buffer. Applying clears the tab's sliders because the effect now lives in the pixels. **Undo last step**, **Revert to original**, and a list of applied steps live on the Save tab; **Download JPEG** on the top bar saves what the preview shows from any tab; **Encode to JPEG and keep editing** does a real JPEG round trip into the working image without leaving the page.
+
+## The stages
 
 **Colour channel shifts** — move each of the red, green and blue layers sideways (X), up/down (Y) and zoom it from the centre (Z), with sub-pixel precision. Edges that end up missing a colour are trimmed off the frame automatically.
 
@@ -33,7 +37,7 @@ Works in current Chrome, Edge, Firefox and Safari. Formats: anything your browse
 
 **Sensor grid (Bayer)** — the final image is re-sampled through a 2×2 colour-filter mosaic (RGGB / BGGR / GRBG / GBRG) and demosaiced back with Malvar-He-Cutler gradient-corrected interpolation (or bilinear), stamping a sensor-like grid structure into the pixel statistics; mix amount. Also an ordered (Bayer-matrix) dither, 2×2 / 4×4 / 8×8, optionally with a different phase per colour channel.
 
-**Live preview** — a reduced-size preview re-renders as you drag (half-size while moving, full preview on release). "Hold: original" (or hold `C`) shows the untouched picture.
+**Live preview** — a reduced-size preview re-renders as you drag (half-size while moving, full preview on release). "Hold: before step" (or hold `C`) shows the working image as it was before the current tab.
 
 **Save** — JPEG at a chosen quality, rendered at full resolution with the same pipeline. Going through the browser's encoder also drops EXIF/GPS metadata. Every export gets a random four-digit name (`4831.jpg`), never repeated in a session, so versions don't get mixed up. Settings can be saved to and loaded from a small `.json` file.
 
@@ -52,5 +56,5 @@ Every slider says in plain language what moving it left or right does.
 
 - Images above 20 megapixels are reduced on load to keep memory sane.
 - Pixel-unit settings (shifts, blur radii, patch sizes) are in full-resolution pixels; the preview scales them so what you see matches what you save.
-- Full-size export of a 12 MP photo with everything switched on takes 10–20 seconds; the page shows progress. The Fourier shift (≈4 s at 12 MP) and Lanczos interpolation forcing are the slowest stages.
+- Applying a step on a 12 MP photo takes from a fraction of a second (tone, jigsaw) to a few seconds (Fourier shift ≈4 s, Lanczos interpolation forcing); the page shows progress. Undo keeps the last three working images in memory.
 - Output is always a fresh JPEG encode of the processed pixels, even with every slider at zero.
